@@ -29,7 +29,7 @@ use std::{
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
-use crate::ldk::{ChannelIdsMap, Router};
+use crate::ldk::{ChannelIdsMap, Router, WebhookStorage};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::routes::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::{
@@ -104,6 +104,7 @@ pub(crate) struct UnlockedAppState {
     pub(crate) output_sweeper: Arc<OutputSweeper>,
     pub(crate) rgb_send_lock: Arc<Mutex<bool>>,
     pub(crate) channel_ids_map: Arc<Mutex<ChannelIdsMap>>,
+    pub(crate) webhook_subscriptions: Arc<Mutex<WebhookStorage>>,
     pub(crate) proxy_endpoint: String,
 }
 

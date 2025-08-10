@@ -12,7 +12,7 @@ use hex::DisplayHex;
 use lightning::ln::bolt11_payment::{
     payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
 };
-use lightning::ln::invoice_utils::create_invoice_from_channelmanager;
+use lightning::ln::invoice_utils::{create_invoice_from_channelmanager, create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_hash};
 use lightning::ln::types::ChannelId;
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
@@ -140,6 +140,26 @@ impl From<RgbLibBalance> for AssetBalanceResponse {
             offchain_inbound: 0,
         }
     }
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct AssetIdToHexBytesRequest {
+    pub(crate) asset_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct AssetIdToHexBytesResponse {
+    pub(crate) hex_bytes: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct AssetIdFromHexBytesRequest {
+    pub(crate) hex_bytes: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct AssetIdFromHexBytesResponse {
+    pub(crate) asset_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -748,6 +768,8 @@ pub(crate) struct LNInvoiceRequest {
     pub(crate) expiry_sec: u32,
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_amount: Option<u64>,
+    pub(crate) preimage: Option<String>,
+    pub(crate) memo: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -828,6 +850,19 @@ pub(crate) struct NodeInfoResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub(crate) enum NodeState {
+    None,
+    Locked,
+    Running,
+    Changing,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct NodeStateResponse {
+    pub(crate) state: NodeState,
+}
+
+#[derive(Deserialize, Serialize)]
 pub(crate) struct OpenChannelRequest {
     pub(crate) peer_pubkey_and_opt_addr: String,
     pub(crate) capacity_sat: u64,
@@ -857,11 +892,13 @@ pub(crate) struct Payment {
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
     pub(crate) payee_pubkey: String,
+    pub(crate) preimage: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Peer {
     pub(crate) pubkey: String,
+    pub(crate) address: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1165,6 +1202,105 @@ pub(crate) struct Utxo {
     pub(crate) colorable: bool,
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct WebhookSubscribeRequest {
+    pub(crate) url: String,
+    pub(crate) events: Vec<String>,
+    pub(crate) secret: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct WebhookSubscribeResponse {
+    pub(crate) subscription_id: String,
+    pub(crate) url: String,
+    pub(crate) events: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct WebhookUnsubscribeRequest {
+    pub(crate) subscription_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct WebhookListResponse {
+    pub(crate) subscriptions: Vec<WebhookSubscription>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct WebhookSubscription {
+    pub(crate) id: String,
+    pub(crate) url: String,
+    pub(crate) events: Vec<String>,
+    pub(crate) created_at: u64,
+    pub(crate) active: bool,
+}
+
+impl lightning::util::ser::Writeable for WebhookSubscription {
+    fn write<W: lightning::util::ser::Writer>(
+        &self,
+        writer: &mut W,
+    ) -> Result<(), lightning::io::Error> {
+        self.id.write(writer)?;
+        self.url.write(writer)?;
+        (self.events.len() as u16).write(writer)?;
+        for event in &self.events {
+            event.write(writer)?;
+        }
+        self.created_at.write(writer)?;
+        self.active.write(writer)?;
+        Ok(())
+    }
+}
+
+impl lightning::util::ser::Readable for WebhookSubscription {
+    fn read<R: lightning::io::Read>(
+        reader: &mut R,
+    ) -> Result<Self, lightning::ln::msgs::DecodeError> {
+        let id: String = lightning::util::ser::Readable::read(reader)?;
+        let url: String = lightning::util::ser::Readable::read(reader)?;
+        let events_len: u16 = lightning::util::ser::Readable::read(reader)?;
+        let mut events = Vec::with_capacity(events_len as usize);
+        for _ in 0..events_len {
+            events.push(lightning::util::ser::Readable::read(reader)?);
+        }
+        let created_at: u64 = lightning::util::ser::Readable::read(reader)?;
+        let active: bool = lightning::util::ser::Readable::read(reader)?;
+
+        Ok(WebhookSubscription {
+            id,
+            url,
+            events,
+            created_at,
+            active,
+        })
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct WebhookPaymentClaimedEvent {
+    pub(crate) event_type: String, // "ReceivedSuccess"
+    pub(crate) timestamp: u64,
+    pub(crate) payment_hash: String,
+    pub(crate) amount_msat: u64,
+    pub(crate) receiver_node_id: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct WebhookPaymentFailedEvent {
+    pub(crate) event_type: String, // "PaymentFailed"
+    pub(crate) timestamp: u64,
+    pub(crate) payment_hash: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct WebhookPaymentSentEvent {
+    pub(crate) event_type: String, // "PaymentSuccess"
+    pub(crate) timestamp: u64,
+    pub(crate) payment_hash: String,
+    pub(crate) fee_paid_msat: u64,
+}
+
 impl AppState {
     fn check_changing_state(&self) -> Result<(), APIError> {
         if *self.get_changing_state() {
@@ -1259,6 +1395,29 @@ pub(crate) async fn asset_balance(
         offchain_outbound,
         offchain_inbound,
     }))
+}
+
+pub(crate) async fn asset_id_from_hex_bytes(
+    WithRejection(Json(payload), _): WithRejection<Json<AssetIdFromHexBytesRequest>, APIError>,
+) -> Result<Json<AssetIdFromHexBytesResponse>, APIError> {
+    let hex_bytes = hex_str_to_vec(&payload.hex_bytes)
+        .ok_or_else(|| APIError::InvalidHexString(payload.hex_bytes))?;
+
+    let contract_id =
+        ContractId::copy_from_slice(&hex_bytes).map_err(|_| APIError::InvalidAssetIDBytes)?;
+    let asset_id = contract_id.to_string();
+
+    Ok(Json(AssetIdFromHexBytesResponse { asset_id }))
+}
+
+pub(crate) async fn asset_id_to_hex_bytes(
+    WithRejection(Json(payload), _): WithRejection<Json<AssetIdToHexBytesRequest>, APIError>,
+) -> Result<Json<AssetIdToHexBytesResponse>, APIError> {
+    let contract_id = ContractId::from_str(&payload.asset_id)
+        .map_err(|_| APIError::InvalidAssetID(payload.asset_id))?;
+    let hex_bytes = hex_str(&contract_id.to_byte_array());
+
+    Ok(Json(AssetIdToHexBytesResponse { hex_bytes }))
 }
 
 pub(crate) async fn asset_metadata(
@@ -2063,6 +2222,7 @@ pub(crate) async fn list_payments(
             created_at: payment_info.created_at,
             updated_at: payment_info.updated_at,
             payee_pubkey: payment_info.payee_pubkey.to_string(),
+            preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
         });
     }
 
@@ -2089,6 +2249,7 @@ pub(crate) async fn list_payments(
             created_at: payment_info.created_at,
             updated_at: payment_info.updated_at,
             payee_pubkey: payment_info.payee_pubkey.to_string(),
+            preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
         });
     }
 
@@ -2133,6 +2294,7 @@ pub(crate) async fn get_payment(
                     created_at: payment_info.created_at,
                     updated_at: payment_info.updated_at,
                     payee_pubkey: payment_info.payee_pubkey.to_string(),
+                    preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
                 },
             }));
         }
@@ -2162,6 +2324,7 @@ pub(crate) async fn get_payment(
                     created_at: payment_info.created_at,
                     updated_at: payment_info.updated_at,
                     payee_pubkey: payment_info.payee_pubkey.to_string(),
+                    preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
                 },
             }));
         }
@@ -2179,6 +2342,10 @@ pub(crate) async fn list_peers(
     for peer_details in unlocked_state.peer_manager.list_peers() {
         peers.push(Peer {
             pubkey: peer_details.counterparty_node_id.to_string(),
+            address: peer_details
+                .socket_address
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
         })
     }
 
@@ -2427,20 +2594,52 @@ pub(crate) async fn ln_invoice(
             RgbLibNetwork::Regtest => Currency::Regtest,
             RgbLibNetwork::Signet => Currency::Signet,
         };
-        let invoice = match create_invoice_from_channelmanager(
-            &unlocked_state.channel_manager,
-            unlocked_state.keys_manager.clone(),
-            state.static_state.logger.clone(),
-            currency,
-            payload.amt_msat,
-            "ldk-tutorial-node".to_string(),
-            payload.expiry_sec,
-            None,
-            contract_id,
-            payload.asset_amount,
-        ) {
-            Ok(inv) => inv,
-            Err(e) => return Err(APIError::FailedInvoiceCreation(e.to_string())),
+
+        let description = payload.memo.unwrap_or_else(|| "ldk-tutorial-node".to_string());
+
+        let (invoice, preimage_opt) = if let Some(ref preimage_hex) = payload.preimage {
+            let preimage_bytes = hex_str_to_vec(&preimage_hex)
+                .and_then(|data| data.try_into().ok())
+                .ok_or_else(|| APIError::InvalidPaymentPreimage)?;
+            let preimage = PaymentPreimage(preimage_bytes);
+            let payment_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
+
+            let invoice = match create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_hash(
+                &unlocked_state.channel_manager,
+                unlocked_state.keys_manager.clone(),
+                state.static_state.logger.clone(),
+                currency,
+                payload.amt_msat,
+                description,
+                std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .expect("for the foreseeable future this shouldn't happen"),
+                payload.expiry_sec,
+                payment_hash,
+                None,
+                contract_id,
+                payload.asset_amount,
+            ) {
+                Ok(inv) => inv,
+                Err(e) => return Err(APIError::FailedInvoiceCreation(e.to_string())),
+            };
+            (invoice, Some(preimage))
+        } else {
+            let invoice = match create_invoice_from_channelmanager(
+                &unlocked_state.channel_manager,
+                unlocked_state.keys_manager.clone(),
+                state.static_state.logger.clone(),
+                currency,
+                payload.amt_msat,
+                description,
+                payload.expiry_sec,
+                None,
+                contract_id,
+                payload.asset_amount,
+            ) {
+                Ok(inv) => inv,
+                Err(e) => return Err(APIError::FailedInvoiceCreation(e.to_string())),
+            };
+            (invoice, None)
         };
 
         let payment_hash = PaymentHash((*invoice.payment_hash()).to_byte_array());
@@ -2448,7 +2647,7 @@ pub(crate) async fn ln_invoice(
         unlocked_state.add_inbound_payment(
             payment_hash,
             PaymentInfo {
-                preimage: None,
+                preimage: preimage_opt,
                 secret: Some(*invoice.payment_secret()),
                 status: HTLCStatus::Pending,
                 amt_msat: payload.amt_msat,
@@ -2854,6 +3053,33 @@ pub(crate) async fn node_info(
         channel_asset_max_amount: u64::MAX,
         network_nodes,
         network_channels,
+    }))
+}
+
+pub(crate) async fn node_state(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<NodeStateResponse>, APIError> {
+    let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
+    if check_already_initialized(&mnemonic_path).is_ok() {
+        return Ok(Json(NodeStateResponse {
+            state: NodeState::None,
+        }));
+    }
+
+    if *state.get_changing_state() {
+        return Ok(Json(NodeStateResponse {
+            state: NodeState::Changing,
+        }));
+    }
+
+    if (state.check_locked().await).is_ok() {
+        return Ok(Json(NodeStateResponse {
+            state: NodeState::Locked,
+        }));
+    }
+
+    Ok(Json(NodeStateResponse {
+        state: NodeState::Running,
     }))
 }
 
@@ -3646,4 +3872,56 @@ pub(crate) async fn unlock(
         Ok(Json(EmptyResponse {}))
     })
     .await
+}
+
+pub(crate) async fn webhook_subscribe(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<WebhookSubscribeRequest>, APIError>,
+) -> Result<Json<WebhookSubscribeResponse>, APIError> {
+    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+
+    if !payload.url.starts_with("http://") && !payload.url.starts_with("https://") {
+        return Err(APIError::InvalidWebhookUrl(
+            "URL must start with http:// or https://".to_string(),
+        ));
+    }
+
+    let subscription_id = uuid::Uuid::new_v4().to_string();
+
+    let subscription = WebhookSubscription {
+        id: subscription_id.clone(),
+        url: payload.url.clone(),
+        events: payload.events.clone(),
+        created_at: get_current_timestamp(),
+        active: true,
+    };
+
+    unlocked_state.add_webhook_subscription(subscription.clone());
+
+    Ok(Json(WebhookSubscribeResponse {
+        subscription_id,
+        url: payload.url,
+        events: payload.events,
+    }))
+}
+
+pub(crate) async fn webhook_unsubscribe(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<WebhookUnsubscribeRequest>, APIError>,
+) -> Result<Json<EmptyResponse>, APIError> {
+    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+
+    unlocked_state.remove_webhook_subscription(&payload.subscription_id);
+
+    Ok(Json(EmptyResponse {}))
+}
+
+pub(crate) async fn webhook_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<WebhookListResponse>, APIError> {
+    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+
+    let subscriptions = unlocked_state.get_webhook_subscriptions();
+
+    Ok(Json(WebhookListResponse { subscriptions }))
 }

@@ -9,9 +9,9 @@ use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{BestBlock, Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
-use lightning::ln::channelmanager::{self, PaymentId, RecentPaymentDetails};
+use lightning::ln::channelmanager::ChainParameters;
 use lightning::ln::channelmanager::{
-    ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
+    self, ChannelManagerReadArgs, PaymentId, RecentPaymentDetails, SimpleArcChannelManager,
 };
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
@@ -86,6 +86,7 @@ use crate::bitcoind::BitcoindClient;
 use crate::disk::{
     self, FilesystemLogger, CHANNEL_IDS_FNAME, CHANNEL_PEER_DATA, INBOUND_PAYMENTS_FNAME,
     MAKER_SWAPS_FNAME, OUTBOUND_PAYMENTS_FNAME, OUTPUT_SPENDER_TXES, TAKER_SWAPS_FNAME,
+    WEBHOOK_SUBSCRIPTIONS_FNAME,
 };
 use crate::error::APIError;
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional, RgbLibWalletWrapper};
@@ -159,6 +160,14 @@ pub(crate) struct ChannelIdsMap {
 
 impl_writeable_tlv_based!(ChannelIdsMap, {
     (0, channel_ids, required),
+});
+
+pub(crate) struct WebhookStorage {
+    pub(crate) subscriptions: HashMap<String, crate::routes::WebhookSubscription>,
+}
+
+impl_writeable_tlv_based!(WebhookStorage, {
+    (0, subscriptions, required),
 });
 
 impl UnlockedAppState {
@@ -390,6 +399,72 @@ impl UnlockedAppState {
         self.fs_store
             .write("", "", CHANNEL_IDS_FNAME, &channel_ids.encode())
             .unwrap();
+    }
+
+    pub(crate) fn add_webhook_subscription(
+        &self,
+        subscription: crate::routes::WebhookSubscription,
+    ) {
+        let mut webhooks = self.get_webhook_subscriptions_storage();
+        webhooks
+            .subscriptions
+            .insert(subscription.id.clone(), subscription);
+        self.save_webhook_subscriptions(webhooks);
+    }
+
+    pub(crate) fn remove_webhook_subscription(&self, subscription_id: &str) {
+        let mut webhooks = self.get_webhook_subscriptions_storage();
+        webhooks.subscriptions.remove(subscription_id);
+        self.save_webhook_subscriptions(webhooks);
+    }
+
+    pub(crate) fn get_webhook_subscriptions(&self) -> Vec<crate::routes::WebhookSubscription> {
+        let webhooks = self.get_webhook_subscriptions_storage();
+        webhooks.subscriptions.values().cloned().collect()
+    }
+
+    fn get_webhook_subscriptions_storage(&self) -> MutexGuard<WebhookStorage> {
+        self.webhook_subscriptions.lock().unwrap()
+    }
+
+    fn save_webhook_subscriptions(&self, webhooks: MutexGuard<WebhookStorage>) {
+        self.fs_store
+            .write("", "", WEBHOOK_SUBSCRIPTIONS_FNAME, &webhooks.encode())
+            .unwrap();
+    }
+
+    pub(crate) async fn send_webhook_event(&self, event_type: &str, payload: serde_json::Value) {
+        let subscriptions = self.get_webhook_subscriptions();
+
+        for subscription in subscriptions {
+            if subscription.active && subscription.events.contains(&event_type.to_string()) {
+                let client = reqwest::Client::new();
+
+                match client
+                    .post(&subscription.url)
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", "RGB-Lightning-Node-Webhook/1.0")
+                    .json(&payload)
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            tracing::info!("Webhook sent successfully to {}", subscription.url);
+                        } else {
+                            tracing::warn!(
+                                "Webhook failed with status {} for URL: {}",
+                                response.status(),
+                                subscription.url
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to send webhook to {}: {}", subscription.url, e);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -660,7 +735,7 @@ async fn handle_ldk_events(
                 payment_hash,
                 amount_msat,
             );
-            let payment_preimage = match purpose {
+            let payment_preimage: Option<PaymentPreimage> = match purpose {
                 PaymentPurpose::Bolt11InvoicePayment {
                     payment_preimage, ..
                 } => payment_preimage,
@@ -672,9 +747,34 @@ async fn handle_ldk_events(
                 } => payment_preimage,
                 PaymentPurpose::SpontaneousPayment(preimage) => Some(preimage),
             };
-            unlocked_state
-                .channel_manager
-                .claim_funds(payment_preimage.unwrap());
+
+            let preimage_to_use = match payment_preimage {
+                Some(preimage) => preimage,
+                None => {
+                    let inbound_payments = unlocked_state.inbound_payments();
+                    match inbound_payments.get(&payment_hash) {
+                        Some(payment_info) => match payment_info.preimage {
+                            Some(preimage) => preimage,
+                            None => {
+                                tracing::error!(
+                                    "EVENT: No payment preimage found for payment hash {}",
+                                    payment_hash
+                                );
+                                return;
+                            }
+                        },
+                        None => {
+                            tracing::error!(
+                                "EVENT: No payment info found for payment hash {}",
+                                payment_hash
+                            );
+                            return;
+                        }
+                    }
+                }
+            };
+
+            unlocked_state.channel_manager.claim_funds(preimage_to_use);
         }
         Event::PaymentClaimed {
             payment_hash,
@@ -723,6 +823,23 @@ async fn handle_ldk_events(
                     receiver_node_id.unwrap(),
                 );
             }
+
+            let webhook_payload = crate::routes::WebhookPaymentClaimedEvent {
+                event_type: "ReceivedSuccess".to_string(),
+                timestamp: crate::utils::get_current_timestamp(),
+                payment_hash: payment_hash.to_string(),
+                amount_msat,
+                receiver_node_id: receiver_node_id.map(|id| id.to_string()),
+            };
+
+            let unlocked_state_copy = unlocked_state.clone();
+            tokio::spawn(async move {
+                if let Ok(payload_json) = serde_json::to_value(&webhook_payload) {
+                    unlocked_state_copy
+                        .send_webhook_event("ReceivedSuccess", payload_json)
+                        .await;
+                }
+            });
         }
         Event::PaymentSent {
             payment_preimage,
@@ -759,6 +876,21 @@ async fn handle_ldk_events(
                     payment_preimage
                 );
             }
+
+            let webhook_payload = crate::routes::WebhookPaymentSentEvent {
+                event_type: "PaymentSuccess".to_string(),
+                timestamp: crate::utils::get_current_timestamp(),
+                payment_hash: payment_hash.to_string(),
+                fee_paid_msat: fee_paid_msat.unwrap_or(0),
+            };
+            let unlocked_state_copy = unlocked_state.clone();
+            tokio::spawn(async move {
+                if let Ok(payload_json) = serde_json::to_value(&webhook_payload) {
+                    unlocked_state_copy
+                        .send_webhook_event("PaymentSuccess", payload_json)
+                        .await;
+                }
+            });
         }
         Event::OpenChannelRequest {
             ref temporary_channel_id,
@@ -828,6 +960,21 @@ async fn handle_ldk_events(
                 );
                 unlocked_state.update_outbound_payment_status(payment_id, HTLCStatus::Failed);
             }
+
+            let webhook_payload = crate::routes::WebhookPaymentFailedEvent {
+                event_type: "PaymentFailed".to_string(),
+                timestamp: crate::utils::get_current_timestamp(),
+                payment_hash: payment_hash.unwrap().to_string(),
+                reason: format!("{:?}", reason.unwrap()),
+            };
+            let unlocked_state_copy = unlocked_state.clone();
+            tokio::spawn(async move {
+                if let Ok(payload_json) = serde_json::to_value(&webhook_payload) {
+                    unlocked_state_copy
+                        .send_webhook_event("PaymentFailed", payload_json)
+                        .await;
+                }
+            });
         }
         Event::InvoiceReceived { .. } => {
             // We don't use the manual invoice payment logic, so this event should never be seen.
@@ -1960,6 +2107,11 @@ pub(crate) async fn start_ldk(
         &ldk_data_dir.join(CHANNEL_IDS_FNAME),
     )));
 
+    // Read webhook subscriptions
+    let webhook_subscriptions = Arc::new(Mutex::new(disk::read_webhook_subscriptions(
+        &ldk_data_dir.join(WEBHOOK_SUBSCRIPTIONS_FNAME),
+    )));
+
     let unlocked_state = Arc::new(UnlockedAppState {
         channel_manager: Arc::clone(&channel_manager),
         inbound_payments,
@@ -1978,6 +2130,7 @@ pub(crate) async fn start_ldk(
         output_sweeper: Arc::clone(&output_sweeper),
         rgb_send_lock: Arc::new(Mutex::new(false)),
         channel_ids_map,
+        webhook_subscriptions,
         proxy_endpoint: proxy_endpoint.to_string(),
     });
 

@@ -39,15 +39,16 @@ use crate::args::LdkUserInfo;
 use crate::error::AppError;
 use crate::ldk::stop_ldk;
 use crate::routes::{
-    address, asset_balance, asset_metadata, backup, btc_balance, change_password,
-    check_indexer_url, check_proxy_endpoint, close_channel, connect_peer, create_utxos,
-    decode_ln_invoice, decode_rgb_invoice, disconnect_peer, estimate_fee, fail_transfers,
-    get_asset_media, get_channel_id, get_payment, get_swap, init, invoice_status, issue_asset_cfa,
-    issue_asset_nia, issue_asset_uda, keysend, list_assets, list_channels, list_payments,
-    list_peers, list_swaps, list_transactions, list_transfers, list_unspents, ln_invoice, lock,
-    maker_execute, maker_init, network_info, node_info, open_channel, post_asset_media,
-    refresh_transfers, restore, rgb_invoice, send_asset, send_btc, send_onion_message,
-    send_payment, shutdown, sign_message, sync, taker, unlock,
+    address, asset_balance, asset_id_from_hex_bytes, asset_id_to_hex_bytes, asset_metadata, backup,
+    btc_balance, change_password, check_indexer_url, check_proxy_endpoint, close_channel,
+    connect_peer, create_utxos, decode_ln_invoice, decode_rgb_invoice, disconnect_peer,
+    estimate_fee, fail_transfers, get_asset_media, get_channel_id, get_payment, get_swap, init,
+    invoice_status, issue_asset_cfa, issue_asset_nia, issue_asset_uda, keysend, list_assets,
+    list_channels, list_payments, list_peers, list_swaps, list_transactions, list_transfers,
+    list_unspents, ln_invoice, lock, maker_execute, maker_init, network_info, node_info,
+    node_state, open_channel, post_asset_media, refresh_transfers, restore, rgb_invoice, send_asset, send_btc,
+    send_onion_message, send_payment, shutdown, sign_message, sync, taker, unlock, webhook_list, webhook_subscribe,
+    webhook_unsubscribe,
 };
 use crate::utils::{start_daemon, AppState, LOGS_DIR};
 
@@ -103,6 +104,8 @@ pub(crate) async fn app(args: LdkUserInfo) -> Result<(Router, Arc<AppState>), Ap
         .layer(DefaultBodyLimit::disable())
         .route("/address", post(address))
         .route("/assetbalance", post(asset_balance))
+        .route("/assetidfromhexbytes", post(asset_id_from_hex_bytes))
+        .route("/assetidtohexbytes", post(asset_id_to_hex_bytes))
         .route("/assetmetadata", post(asset_metadata))
         .route("/backup", post(backup))
         .route("/btcbalance", post(btc_balance))
@@ -141,6 +144,7 @@ pub(crate) async fn app(args: LdkUserInfo) -> Result<(Router, Arc<AppState>), Ap
         .route("/makerinit", post(maker_init))
         .route("/networkinfo", get(network_info))
         .route("/nodeinfo", get(node_info))
+        .route("/nodestate", get(node_state))
         .route("/openchannel", post(open_channel))
         .route("/refreshtransfers", post(refresh_transfers))
         .route("/restore", post(restore))
@@ -154,6 +158,9 @@ pub(crate) async fn app(args: LdkUserInfo) -> Result<(Router, Arc<AppState>), Ap
         .route("/sync", post(sync))
         .route("/taker", post(taker))
         .route("/unlock", post(unlock))
+        .route("/webhook/subscribe", post(webhook_subscribe))
+        .route("/webhook/unsubscribe", post(webhook_unsubscribe))
+        .route("/webhook/list", get(webhook_list))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<_>| {

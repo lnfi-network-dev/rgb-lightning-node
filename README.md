@@ -155,6 +155,8 @@ curl -X POST -H "Content-type: application/json" \
 The node currently exposes the following APIs:
 - `/address` (POST)
 - `/assetbalance` (POST)
+- `/assetidfromhexbytes` (POST)
+- `/assetidtohexbytes` (POST)
 - `/assetmetadata` (POST)
 - `/backup` (POST)
 - `/btcbalance` (POST)
@@ -207,6 +209,9 @@ The node currently exposes the following APIs:
 - `/sync` (POST)
 - `/taker` (POST)
 - `/unlock` (POST)
+- `/webhook/list` (GET)
+- `/webhook/subscribe` (POST)
+- `/webhook/unsubscribe` (POST)
 
 To get more details about the available APIs see the [OpenAPI specification].
 A Swagger UI for the `master` branch is generated from the specification and

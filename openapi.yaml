@@ -29,6 +29,8 @@ tags:
     description: APIs to perform asset swaps
   - name: Other
     description: APIs to perform other operations
+  - name: Webhooks
+    description: APIs to manage webhook subscriptions
 paths:
   /address:
     post:
@@ -61,6 +63,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AssetBalanceResponse'
+  /assetidfromhexbytes:
+    post:
+      tags:
+        - RGB
+      summary: Convert hex-encoded bytes to RGB asset ID
+      description: Convert asset ID bytes in hexadecimal format to the corresponding baid64 string form
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetIdFromHexBytesRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetIdFromHexBytesResponse'
+  /assetidtohexbytes:
+    post:
+      tags:
+        - RGB
+      summary: Convert RGB asset ID to hex-encoded bytes
+      description: Convert RGB asset ID in baid64 string form to its bytes in hexadecimal format
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetIdToHexBytesRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetIdToHexBytesResponse'
   /assetmetadata:
     post:
       tags:
@@ -711,6 +751,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NodeInfoResponse'
+  /nodestate:
+    get:
+      tags:
+        - Other
+      summary: Get node state
+      description: Get the current state of the RGB Lightning Node
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeStateResponse'
   /openchannel:
     post:
       tags:
@@ -954,6 +1007,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EmptyResponse'
+  /webhook/list:
+    get:
+      tags:
+        - Webhooks
+      summary: List webhook subscriptions
+      description: List all webhook subscriptions
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookListResponse'
+  /webhook/subscribe:
+    post:
+      tags:
+        - Webhooks
+      summary: Subscribe to webhook events
+      description: Subscribe to receive webhook notifications for specific events
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookSubscribeRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscribeResponse'
+  /webhook/unsubscribe:
+    post:
+      tags:
+        - Webhooks
+      summary: Unsubscribe from webhook events
+      description: Unsubscribe from webhook notifications by subscription ID
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookUnsubscribeRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmptyResponse'
 components:
   schemas:
     AddressResponse:
@@ -986,6 +1088,30 @@ components:
         offchain_inbound:
           type: integer
           example: 0
+    AssetIdFromHexBytesRequest:
+      type: object
+      properties:
+        hex_bytes:
+          type: string
+          example: 08991be186708d18b3dac93f3c044f8a8c2d558235717004602a8ec137ef459f
+    AssetIdFromHexBytesResponse:
+      type: object
+      properties:
+        asset_id:
+          type: string
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+    AssetIdToHexBytesRequest:
+      type: object
+      properties:
+        asset_id:
+          type: string
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+    AssetIdToHexBytesResponse:
+      type: object
+      properties:
+        hex_bytes:
+          type: string
+          example: 08991be186708d18b3dac93f3c044f8a8c2d558235717004602a8ec137ef459f
     AssetMetadataRequest:
       type: object
       properties:
@@ -1760,6 +1886,14 @@ components:
         asset_amount:
           type: integer
           example: 42
+        preimage:
+          type: string
+          description: Optional custom payment preimage (hex string, 32 bytes)
+          example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        memo:
+          type: string
+          description: Optional memo/description for the invoice
+          example: "Payment for services"
     LNInvoiceResponse:
       type: object
       properties:
@@ -1882,6 +2016,25 @@ components:
         network_channels:
           type: integer
           example: 7812821
+    NodeState:
+      type: string
+      enum:
+        - None
+        - Locked
+        - Running
+        - Changing
+      example: Running
+      description: |
+        The current state of the RGB Lightning Node:
+        * `None` - Node is not initialized (no mnemonic file exists)
+        * `Locked` - Node is initialized but locked (needs to be unlocked)
+        * `Running` - Node is unlocked and running (can perform all operations)
+        * `Changing` - Node is in the process of changing state (wait for completion)
+    NodeStateResponse:
+      type: object
+      properties:
+        state:
+          $ref: '#/components/schemas/NodeState'
     OpenChannelRequest:
       type: object
       properties:
@@ -1950,12 +2103,19 @@ components:
         payee_pubkey:
           type: string
           example: 03b79a4bc1ec365524b4fab9a39eb133753646babb5a1da5c4bc94c53110b7795d
+        preimage:
+          type: string
+          description: Optional custom payment preimage (hex string, 32 bytes)
+          example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
     Peer:
       type: object
       properties:
         pubkey:
           type: string
           example: 03b79a4bc1ec365524b4fab9a39eb133753646babb5a1da5c4bc94c53110b7795d
+        address:
+          type: string
+          example: 127.0.0.1:9735
     PostAssetMediaRequest:
       type: object
       properties:
@@ -2384,3 +2544,69 @@ components:
         colorable:
           type: boolean
           example: true
+    WebhookListResponse:
+      type: object
+      properties:
+        subscriptions:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookSubscription'
+    WebhookSubscribeRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          example: https://your-webhook-endpoint.com/webhook
+        events:
+          type: array
+          items:
+            type: string
+          example: [ReceivedSuccess, PaymentSuccess, PaymentFailed]
+        secret:
+          type: string
+          example: your-webhook-secret
+      required:
+        - url
+        - events
+    WebhookSubscribeResponse:
+      type: object
+      properties:
+        subscription_id:
+          type: string
+          example: 550e8400-e29b-41d4-a716-446655440000
+        url:
+          type: string
+          example: https://your-webhook-endpoint.com/webhook
+        events:
+          type: array
+          items:
+            type: string
+          example: [ReceivedSuccess, PaymentSuccess, PaymentFailed]
+    WebhookSubscription:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 550e8400-e29b-41d4-a716-446655440000
+        url:
+          type: string
+          example: https://your-webhook-endpoint.com/webhook
+        events:
+          type: array
+          items:
+            type: string
+          example: [ReceivedSuccess, PaymentSuccess, PaymentFailed]
+        created_at:
+          type: integer
+          example: 1703123456
+        active:
+          type: boolean
+          example: true
+    WebhookUnsubscribeRequest:
+      type: object
+      properties:
+        subscription_id:
+          type: string
+          example: 550e8400-e29b-41d4-a716-446655440000
+      required:
+        - subscription_id

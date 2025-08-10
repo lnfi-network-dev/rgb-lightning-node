@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::error::APIError;
 use crate::ldk::{
     ChannelIdsMap, InboundPaymentInfoStorage, NetworkGraph, OutboundPaymentInfoStorage,
-    OutputSpenderTxes, SwapMap,
+    OutputSpenderTxes, SwapMap, WebhookStorage,
 };
 use crate::utils::{parse_peer_info, LOGS_DIR};
 
@@ -32,6 +32,8 @@ pub(crate) const CHANNEL_IDS_FNAME: &str = "channel_ids";
 
 pub(crate) const MAKER_SWAPS_FNAME: &str = "maker_swaps";
 pub(crate) const TAKER_SWAPS_FNAME: &str = "taker_swaps";
+
+pub(crate) const WEBHOOK_SUBSCRIPTIONS_FNAME: &str = "webhook_subscriptions";
 
 pub(crate) struct FilesystemLogger {
     data_dir: PathBuf,
@@ -220,5 +222,16 @@ pub(crate) fn read_channel_ids_info(path: &Path) -> ChannelIdsMap {
     }
     ChannelIdsMap {
         channel_ids: HashMap::new(),
+    }
+}
+
+pub(crate) fn read_webhook_subscriptions(path: &Path) -> WebhookStorage {
+    if let Ok(file) = File::open(path) {
+        if let Ok(info) = WebhookStorage::read(&mut BufReader::new(file)) {
+            return info;
+        }
+    }
+    WebhookStorage {
+        subscriptions: HashMap::new(),
     }
 }
