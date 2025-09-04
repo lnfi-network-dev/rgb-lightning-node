@@ -17,6 +17,7 @@ use lightning_persister::fs_store::FilesystemStore;
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
 use std::{
+    collections::HashSet,
     fmt::Write,
     fs,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
@@ -33,7 +34,7 @@ use crate::ldk::{ChannelIdsMap, Router, WebhookStorage};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::routes::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::{
-    args::LdkUserInfo,
+    args::UserArgs,
     disk::FilesystemLogger,
     error::{APIError, AppError},
     ldk::{
@@ -59,20 +60,24 @@ pub(crate) struct AppState {
     pub(crate) unlocked_app_state: Arc<TokioMutex<Option<Arc<UnlockedAppState>>>>,
     pub(crate) ldk_background_services: Arc<Mutex<Option<LdkBackgroundServices>>>,
     pub(crate) changing_state: Mutex<bool>,
+    pub(crate) root_public_key: Option<biscuit_auth::PublicKey>,
+    pub(crate) revoked_tokens: Arc<Mutex<HashSet<Vec<u8>>>>,
 }
 
 impl AppState {
-    pub(crate) fn get_changing_state(&self) -> MutexGuard<bool> {
+    pub(crate) fn get_changing_state(&self) -> MutexGuard<'_, bool> {
         self.changing_state.lock().unwrap()
     }
 
-    pub(crate) fn get_ldk_background_services(&self) -> MutexGuard<Option<LdkBackgroundServices>> {
+    pub(crate) fn get_ldk_background_services(
+        &self,
+    ) -> MutexGuard<'_, Option<LdkBackgroundServices>> {
         self.ldk_background_services.lock().unwrap()
     }
 
     pub(crate) async fn get_unlocked_app_state(
         &self,
-    ) -> TokioMutexGuard<Option<Arc<UnlockedAppState>>> {
+    ) -> TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>> {
         self.unlocked_app_state.lock().await
     }
 }
@@ -109,23 +114,23 @@ pub(crate) struct UnlockedAppState {
 }
 
 impl UnlockedAppState {
-    pub(crate) fn get_inbound_payments(&self) -> MutexGuard<InboundPaymentInfoStorage> {
+    pub(crate) fn get_inbound_payments(&self) -> MutexGuard<'_, InboundPaymentInfoStorage> {
         self.inbound_payments.lock().unwrap()
     }
 
-    pub(crate) fn get_outbound_payments(&self) -> MutexGuard<OutboundPaymentInfoStorage> {
+    pub(crate) fn get_outbound_payments(&self) -> MutexGuard<'_, OutboundPaymentInfoStorage> {
         self.outbound_payments.lock().unwrap()
     }
 
-    pub(crate) fn get_maker_swaps(&self) -> MutexGuard<SwapMap> {
+    pub(crate) fn get_maker_swaps(&self) -> MutexGuard<'_, SwapMap> {
         self.maker_swaps.lock().unwrap()
     }
 
-    pub(crate) fn get_taker_swaps(&self) -> MutexGuard<SwapMap> {
+    pub(crate) fn get_taker_swaps(&self) -> MutexGuard<'_, SwapMap> {
         self.taker_swaps.lock().unwrap()
     }
 
-    pub(crate) fn get_channel_ids_map(&self) -> MutexGuard<ChannelIdsMap> {
+    pub(crate) fn get_channel_ids_map(&self) -> MutexGuard<'_, ChannelIdsMap> {
         self.channel_ids_map.lock().unwrap()
     }
 }
@@ -340,7 +345,7 @@ pub(crate) fn parse_peer_info(
     Ok((pubkey.unwrap(), peer_addr))
 }
 
-pub(crate) async fn start_daemon(args: &LdkUserInfo) -> Result<Arc<AppState>, AppError> {
+pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppError> {
     // Initialize the Logger (creates ldk_data_dir and its logs directory)
     let ldk_data_dir = args.storage_dir_path.join(LDK_DIR);
     let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
@@ -356,13 +361,23 @@ pub(crate) async fn start_daemon(args: &LdkUserInfo) -> Result<Arc<AppState>, Ap
         max_media_upload_size_mb: args.max_media_upload_size_mb,
     });
 
-    Ok(Arc::new(AppState {
+    let app_state = Arc::new(AppState {
         static_state,
         cancel_token,
         unlocked_app_state: Arc::new(TokioMutex::new(None)),
         ldk_background_services: Arc::new(Mutex::new(None)),
         changing_state: Mutex::new(false),
-    }))
+        root_public_key: args.root_public_key,
+        revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
+    });
+
+    // Load revoked tokens from file if authentication is enabled
+    if app_state.root_public_key.is_some() {
+        let loaded_tokens = app_state.load_revoked_tokens()?;
+        *app_state.revoked_tokens.lock().unwrap() = loaded_tokens;
+    }
+
+    Ok(app_state)
 }
 
 pub(crate) fn get_current_timestamp() -> u64 {

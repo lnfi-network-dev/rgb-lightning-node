@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use axum_extra::extract::WithRejection;
+use biscuit_auth::Biscuit;
 use bitcoin::hashes::sha256::{self, Hash as Sha256};
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
@@ -932,6 +933,11 @@ pub(crate) struct RestoreRequest {
     pub(crate) password: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RevokeTokenRequest {
+    pub(crate) token: String,
+}
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct RgbAllocation {
     pub(crate) asset_id: Option<String>,
@@ -944,6 +950,7 @@ pub(crate) struct RgbInvoiceRequest {
     pub(crate) asset_id: Option<String>,
     pub(crate) duration_seconds: Option<u32>,
     pub(crate) min_confirmations: u8,
+    pub(crate) witness: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1311,7 +1318,7 @@ impl AppState {
 
     async fn check_locked(
         &self,
-    ) -> Result<TokioMutexGuard<Option<Arc<UnlockedAppState>>>, APIError> {
+    ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
         self.check_changing_state()?;
         let unlocked_app_state = self.get_unlocked_app_state().await;
         if unlocked_app_state.is_some() {
@@ -1323,7 +1330,7 @@ impl AppState {
 
     async fn check_unlocked(
         &self,
-    ) -> Result<TokioMutexGuard<Option<Arc<UnlockedAppState>>>, APIError> {
+    ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
         self.check_changing_state()?;
         let unlocked_app_state = self.get_unlocked_app_state().await;
         if unlocked_app_state.is_none() {
@@ -3419,6 +3426,21 @@ pub(crate) async fn restore(
     .await
 }
 
+pub(crate) async fn revoke_token(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<RevokeTokenRequest>, APIError>,
+) -> Result<Json<EmptyResponse>, APIError> {
+    let Some(root_pubkey) = state.root_public_key else {
+        return Err(APIError::AuthenticationDisabled);
+    };
+
+    let token_to_revoke = Biscuit::from_base64(&payload.token, root_pubkey)
+        .map_err(|_| APIError::InvalidBiscuitToken)?;
+    state.revoke_token(&token_to_revoke)?;
+
+    Ok(Json(EmptyResponse {}))
+}
+
 pub(crate) async fn rgb_invoice(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<RgbInvoiceRequest>, APIError>,
@@ -3430,12 +3452,21 @@ pub(crate) async fn rgb_invoice(
             return Err(APIError::OpenChannelInProgress);
         }
 
-        let receive_data = unlocked_state.rgb_blind_receive(
-            payload.asset_id,
-            payload.duration_seconds,
-            vec![unlocked_state.proxy_endpoint.clone()],
-            payload.min_confirmations,
-        )?;
+        let receive_data = if payload.witness {
+            unlocked_state.rgb_witness_receive(
+                payload.asset_id,
+                payload.duration_seconds,
+                vec![unlocked_state.proxy_endpoint.clone()],
+                payload.min_confirmations,
+            )?
+        } else {
+            unlocked_state.rgb_blind_receive(
+                payload.asset_id,
+                payload.duration_seconds,
+                vec![unlocked_state.proxy_endpoint.clone()],
+                payload.min_confirmations,
+            )?
+        };
 
         Ok(Json(RgbInvoiceResponse {
             recipient_id: receive_data.recipient_id,

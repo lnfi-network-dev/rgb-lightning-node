@@ -837,6 +837,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EmptyResponse'
+  /revoketoken:
+    post:
+      tags:
+        - Other
+      summary: Revoke a token
+      description: Revoke an authentication token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeTokenRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmptyResponse'
   /rgbinvoice:
     post:
       tags:
@@ -2154,6 +2172,12 @@ components:
         password:
           type: string
           example: nodepassword
+    RevokeTokenRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          example: EnYKDBgDIggKBggGEgIYDRIkCAASICqCgqtFMIJ1eLCM3raDzqg9UqV-6nJWzGjjJG0S5IIUGkBpF-itmppHcdcSrSCiKklz9VZT4UmIND_0RFc32Imq3bLR_Y7GYaSpJo5lJfU1cA2BG_hy7P1UN4g5jKTKS88GIiIKIAUKXrrx0Ca-rMZa537VOFw2X8q_KVQ6OC4Z0ztro0sQ
     RgbAllocation:
       type: object
       properties:
@@ -2177,6 +2201,9 @@ components:
         duration_seconds:
           type: integer
           example: 86400
+        witness:
+          type: boolean
+          example: false
     RgbInvoiceResponse:
       type: object
       properties:
@@ -2610,3 +2637,10 @@ components:
           example: 550e8400-e29b-41d4-a716-446655440000
       required:
         - subscription_id
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Biscuit
+security:
+  - bearerAuth: []

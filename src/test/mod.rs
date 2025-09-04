@@ -1,4 +1,6 @@
 use amplify::s;
+use biscuit_auth::{builder::date, macros::*, KeyPair};
+use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
 use lazy_static::lazy_static;
 use lightning_invoice::Bolt11Invoice;
@@ -34,7 +36,7 @@ use crate::routes::{
     ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse,
     ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest,
     MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, NodeStateResponse, OpenChannelRequest,
-    OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, RefreshRequest, RestoreRequest,
+    OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, RefreshRequest, RestoreRequest, RevokeTokenRequest,
     RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest, SendAssetResponse, SendBtcRequest,
     SendBtcResponse, SendPaymentRequest, SendPaymentResponse, Swap, SwapStatus, TakerRequest,
     Transaction, Transfer, UnlockRequest, Unspent,
@@ -54,7 +56,7 @@ static INIT: Once = Once::new();
 static MINER: Lazy<RwLock<Miner>> = Lazy::new(|| RwLock::new(Miner { no_mine_count: 0 }));
 
 #[cfg(test)]
-impl Default for LdkUserInfo {
+impl Default for UserArgs {
     fn default() -> Self {
         Self {
             network: BitcoinNetwork::Regtest,
@@ -62,6 +64,7 @@ impl Default for LdkUserInfo {
             daemon_listening_port: 3001,
             ldk_peer_listening_port: 9735,
             max_media_upload_size_mb: 3,
+            root_public_key: None,
         }
     }
 }
@@ -131,13 +134,18 @@ fn _get_txout(txid: &str) -> String {
     .unwrap()
 }
 
-async fn start_daemon(node_test_dir: &str, node_peer_port: u16) -> SocketAddr {
+async fn start_daemon(
+    node_test_dir: &str,
+    node_peer_port: u16,
+    root_public_key: Option<biscuit_auth::PublicKey>,
+) -> SocketAddr {
     let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
     let node_address = listener.local_addr().unwrap();
     std::fs::create_dir_all(node_test_dir).unwrap();
-    let args = LdkUserInfo {
+    let args = UserArgs {
         storage_dir_path: node_test_dir.into(),
         ldk_peer_listening_port: node_peer_port,
+        root_public_key,
         ..Default::default()
     };
     tokio::spawn(async move {
@@ -159,7 +167,7 @@ async fn start_node(
     if !keep_node_dir && Path::new(&node_test_dir).is_dir() {
         std::fs::remove_dir_all(node_test_dir).unwrap();
     }
-    let node_address = start_daemon(node_test_dir, node_peer_port).await;
+    let node_address = start_daemon(node_test_dir, node_peer_port, None).await;
 
     let password = format!("{node_test_dir}.{node_peer_port}");
 
@@ -1244,7 +1252,11 @@ async fn restore(node_address: SocketAddr, backup_path: &str, password: &str) {
         .unwrap();
 }
 
-async fn rgb_invoice(node_address: SocketAddr, asset_id: Option<String>) -> RgbInvoiceResponse {
+async fn rgb_invoice(
+    node_address: SocketAddr,
+    asset_id: Option<String>,
+    witness: bool,
+) -> RgbInvoiceResponse {
     println!(
         "generating RGB invoice{} for node {node_address}",
         if let Some(id) = asset_id.as_ref() {
@@ -1257,6 +1269,7 @@ async fn rgb_invoice(node_address: SocketAddr, asset_id: Option<String>) -> RgbI
         min_confirmations: 1,
         asset_id,
         duration_seconds: None,
+        witness,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/rgbinvoice"))
@@ -1435,9 +1448,8 @@ async fn taker(node_address: SocketAddr, swapstring: String) -> EmptyResponse {
         .unwrap()
 }
 
-async fn unlock_res(node_address: SocketAddr, password: &str) -> Response {
-    println!("unlocking node {node_address}");
-    let payload = UnlockRequest {
+fn unlock_req(password: &str) -> UnlockRequest {
+    UnlockRequest {
         password: password.to_string(),
         bitcoind_rpc_username: s!("user"),
         bitcoind_rpc_password: s!("password"),
@@ -1447,7 +1459,12 @@ async fn unlock_res(node_address: SocketAddr, password: &str) -> Response {
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
         announce_addresses: vec![],
         announce_alias: Some(s!("RLN_alias")),
-    };
+    }
+}
+
+async fn unlock_res(node_address: SocketAddr, password: &str) -> Response {
+    println!("unlocking node {node_address}");
+    let payload = unlock_req(password);
     reqwest::Client::new()
         .post(format!("http://{node_address}/unlock"))
         .json(&payload)
@@ -1717,6 +1734,7 @@ pub fn mock_fee(fee: u32) -> u32 {
 }
 
 mod asset_id_hex_bytes;
+mod authentication;
 mod backup_and_restore;
 mod close_coop_nobtc_acceptor;
 mod close_coop_other_side;
