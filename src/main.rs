@@ -49,9 +49,9 @@ use crate::routes::{
     invoice_status, issue_asset_cfa, issue_asset_nia, issue_asset_uda, keysend, list_assets,
     list_channels, list_payments, list_peers, list_swaps, list_transactions, list_transfers,
     list_unspents, ln_invoice, lock, maker_execute, maker_init, network_info, node_info,
-    node_state, open_channel, post_asset_media, refresh_transfers, restore, revoke_token, rgb_invoice, send_asset, send_btc,
-    send_onion_message, send_payment, shutdown, sign_message, sync, taker, unlock, webhook_list, webhook_subscribe,
-    webhook_unsubscribe,
+    node_state, open_channel, post_asset_media, refresh_transfers, restore, revoke_token,
+    rgb_invoice, send_asset, send_btc, send_onion_message, send_payment, shutdown, sign_message,
+    sync, taker, unlock, webhook_list, webhook_subscribe, webhook_unsubscribe,
 };
 use crate::utils::{start_daemon, AppState, LOGS_DIR};
 

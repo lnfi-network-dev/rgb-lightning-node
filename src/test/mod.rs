@@ -35,11 +35,11 @@ use crate::routes::{
     ListChannelsResponse, ListPaymentsResponse, ListPeersResponse, ListSwapsResponse,
     ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse,
     ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest,
-    MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, NodeStateResponse, OpenChannelRequest,
-    OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, RefreshRequest, RestoreRequest, RevokeTokenRequest,
-    RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest, SendAssetResponse, SendBtcRequest,
-    SendBtcResponse, SendPaymentRequest, SendPaymentResponse, Swap, SwapStatus, TakerRequest,
-    Transaction, Transfer, UnlockRequest, Unspent,
+    MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, NodeStateResponse,
+    OpenChannelRequest, OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, RefreshRequest,
+    RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest,
+    SendAssetResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest, SendPaymentResponse,
+    Swap, SwapStatus, TakerRequest, Transaction, Transfer, UnlockRequest, Unspent,
 };
 use crate::utils::{hex_str_to_vec, ELECTRUM_URL_REGTEST, PROXY_ENDPOINT_LOCAL};
 

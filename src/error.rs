@@ -116,7 +116,7 @@ pub enum APIError {
 
     #[error("Invalid hex bytes")]
     InvalidAssetIDBytes,
-    
+
     #[error("Invalid assignment")]
     InvalidAssignment,
 
