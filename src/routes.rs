@@ -59,7 +59,8 @@ use rgb_lib::{
         AssetCFA as RgbLibAssetCFA, AssetNIA as RgbLibAssetNIA, AssetUDA as RgbLibAssetUDA,
         Balance as RgbLibBalance, EmbeddedMedia as RgbLibEmbeddedMedia, Invoice as RgbLibInvoice,
         Media as RgbLibMedia, ProofOfReserves as RgbLibProofOfReserves, Recipient, RecipientInfo,
-        Token as RgbLibToken, TokenLight as RgbLibTokenLight, WitnessData,
+        RecipientType as RgbLibRecipientType, Token as RgbLibToken, TokenLight as RgbLibTokenLight,
+        WitnessData as RgbLibWitnessData,
     },
     AssetSchema as RgbLibAssetSchema, Assignment as RgbLibAssignment,
     BitcoinNetwork as RgbLibNetwork, ContractId, RgbTransport,
@@ -495,6 +496,7 @@ pub(crate) struct DecodeRGBInvoiceRequest {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct DecodeRGBInvoiceResponse {
     pub(crate) recipient_id: String,
+    pub(crate) recipient_type: RecipientType,
     pub(crate) asset_schema: Option<AssetSchema>,
     pub(crate) asset_id: Option<String>,
     pub(crate) assignment: Assignment,
@@ -925,6 +927,21 @@ impl From<RgbLibProofOfReserves> for ProofOfReserves {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) enum RecipientType {
+    Blind,
+    Witness,
+}
+
+impl From<RgbLibRecipientType> for RecipientType {
+    fn from(value: RgbLibRecipientType) -> Self {
+        match value {
+            RgbLibRecipientType::Blind => Self::Blind,
+            RgbLibRecipientType::Witness => Self::Witness,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct RefreshRequest {
     pub(crate) skip_sync: bool,
@@ -951,6 +968,7 @@ pub(crate) struct RgbAllocation {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct RgbInvoiceRequest {
     pub(crate) asset_id: Option<String>,
+    pub(crate) assignment: Option<Assignment>,
     pub(crate) duration_seconds: Option<u32>,
     pub(crate) min_confirmations: u8,
     pub(crate) witness: bool,
@@ -969,6 +987,7 @@ pub(crate) struct SendAssetRequest {
     pub(crate) asset_id: String,
     pub(crate) assignment: Assignment,
     pub(crate) recipient_id: String,
+    pub(crate) witness_data: Option<WitnessData>,
     pub(crate) donation: bool,
     pub(crate) fee_rate: u64,
     pub(crate) min_confirmations: u8,
@@ -1311,6 +1330,21 @@ pub(crate) struct WebhookPaymentSentEvent {
     pub(crate) fee_paid_msat: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct WitnessData {
+    pub(crate) amount_sat: u64,
+    pub(crate) blinding: Option<u64>,
+}
+
+impl From<WitnessData> for RgbLibWitnessData {
+    fn from(value: WitnessData) -> Self {
+        Self {
+            amount_sat: value.amount_sat,
+            blinding: value.blinding,
+        }
+    }
+}
+
 impl AppState {
     fn check_changing_state(&self) -> Result<(), APIError> {
         if *self.get_changing_state() {
@@ -1362,7 +1396,8 @@ impl AppState {
 pub(crate) async fn address(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AddressResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let address = unlocked_state.rgb_get_address()?;
 
@@ -1373,7 +1408,8 @@ pub(crate) async fn asset_balance(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<AssetBalanceRequest>, APIError>,
 ) -> Result<Json<AssetBalanceResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let contract_id = ContractId::from_str(&payload.asset_id)
         .map_err(|_| APIError::InvalidAssetID(payload.asset_id))?;
@@ -1461,7 +1497,7 @@ pub(crate) async fn backup(
     WithRejection(Json(payload), _): WithRejection<Json<BackupRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let _unlocked_state = state.check_locked().await?;
+        let _guard = state.check_locked().await?;
 
         let _mnemonic =
             check_password_validity(&payload.password, &state.static_state.storage_dir_path)?;
@@ -1481,7 +1517,8 @@ pub(crate) async fn btc_balance(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<BtcBalanceRequest>, APIError>,
 ) -> Result<Json<BtcBalanceResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let btc_balance = unlocked_state.rgb_get_btc_balance(payload.skip_sync)?;
 
@@ -1505,7 +1542,7 @@ pub(crate) async fn change_password(
     WithRejection(Json(payload), _): WithRejection<Json<ChangePasswordRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let _unlocked_state = state.check_locked().await?;
+        let _guard = state.check_locked().await?;
 
         check_password_strength(payload.new_password.clone())?;
 
@@ -1546,7 +1583,8 @@ pub(crate) async fn close_channel(
     WithRejection(Json(payload), _): WithRejection<Json<CloseChannelRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let channel_id_vec = hex_str_to_vec(&payload.channel_id);
         if channel_id_vec.is_none() || channel_id_vec.as_ref().unwrap().len() != 32 {
@@ -1563,6 +1601,24 @@ pub(crate) async fn close_channel(
             Err(_) => return Err(APIError::InvalidPubkey),
         };
 
+        if let Some(chan_details) = unlocked_state
+            .channel_manager
+            .list_channels()
+            .iter()
+            .find(|c| c.channel_id == requested_cid)
+        {
+            match chan_details.channel_shutdown_state {
+                Some(ChannelShutdownState::NotShuttingDown) => {}
+                _ => {
+                    return Err(APIError::CannotCloseChannel(s!(
+                        "Channel is already being closed"
+                    )))
+                }
+            }
+        } else {
+            return Err(APIError::UnknownChannelId);
+        }
+
         if payload.force {
             match unlocked_state
                 .channel_manager
@@ -1572,7 +1628,12 @@ pub(crate) async fn close_channel(
                     "Manually force-closed".to_string(),
                 ) {
                 Ok(()) => tracing::info!("EVENT: initiating channel force-close"),
-                Err(e) => return Err(APIError::FailedClosingChannel(format!("{e:?}"))),
+                Err(e) => match e {
+                    LDKAPIError::APIMisuseError { err } => {
+                        return Err(APIError::FailedClosingChannel(err))
+                    }
+                    _ => return Err(APIError::CannotCloseChannel(format!("{e:?}"))),
+                },
             }
         } else {
             match unlocked_state
@@ -1580,7 +1641,12 @@ pub(crate) async fn close_channel(
                 .close_channel(&requested_cid, &peer_pubkey)
             {
                 Ok(()) => tracing::info!("EVENT: initiating channel close"),
-                Err(e) => return Err(APIError::FailedClosingChannel(format!("{e:?}"))),
+                Err(e) => match e {
+                    LDKAPIError::APIMisuseError { err } => {
+                        return Err(APIError::FailedClosingChannel(err))
+                    }
+                    _ => return Err(APIError::CannotCloseChannel(format!("{e:?}"))),
+                },
             }
         }
 
@@ -1594,7 +1660,8 @@ pub(crate) async fn connect_peer(
     WithRejection(Json(payload), _): WithRejection<Json<ConnectPeerRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let (peer_pubkey, peer_addr) = parse_peer_info(payload.peer_pubkey_and_addr.to_string())?;
 
@@ -1622,7 +1689,8 @@ pub(crate) async fn create_utxos(
     WithRejection(Json(payload), _): WithRejection<Json<CreateUtxosRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         unlocked_state.rgb_create_utxos(
             payload.up_to,
@@ -1642,7 +1710,7 @@ pub(crate) async fn decode_ln_invoice(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<DecodeLNInvoiceRequest>, APIError>,
 ) -> Result<Json<DecodeLNInvoiceResponse>, APIError> {
-    let _unlocked_app_state = state.get_unlocked_app_state();
+    let _guard = state.get_unlocked_app_state();
 
     let invoice = match Bolt11Invoice::from_str(&payload.invoice) {
         Err(e) => return Err(APIError::InvalidInvoice(e.to_string())),
@@ -1666,12 +1734,14 @@ pub(crate) async fn decode_rgb_invoice(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<DecodeRGBInvoiceRequest>, APIError>,
 ) -> Result<Json<DecodeRGBInvoiceResponse>, APIError> {
-    let _unlocked_app_state = state.get_unlocked_app_state();
+    let _guard = state.get_unlocked_app_state();
 
     let invoice_data = RgbLibInvoice::new(payload.invoice)?.invoice_data();
+    let recipient_info = RecipientInfo::new(invoice_data.recipient_id.clone())?;
 
     Ok(Json(DecodeRGBInvoiceResponse {
         recipient_id: invoice_data.recipient_id,
+        recipient_type: recipient_info.recipient_type.into(),
         asset_schema: invoice_data.asset_schema.map(|s| s.into()),
         asset_id: invoice_data.asset_id,
         assignment: invoice_data.assignment.into(),
@@ -1686,7 +1756,8 @@ pub(crate) async fn disconnect_peer(
     WithRejection(Json(payload), _): WithRejection<Json<DisconnectPeerRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let peer_pubkey = match PublicKey::from_str(&payload.peer_pubkey) {
             Ok(pubkey) => pubkey,
@@ -1746,7 +1817,8 @@ pub(crate) async fn fail_transfers(
     WithRejection(Json(payload), _): WithRejection<Json<FailTransfersRequest>, APIError>,
 ) -> Result<Json<FailTransfersResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let unlocked_state_copy = unlocked_state.clone();
         let transfers_changed = tokio::task::spawn_blocking(move || {
@@ -1829,7 +1901,8 @@ pub(crate) async fn invoice_status(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<InvoiceStatusRequest>, APIError>,
 ) -> Result<Json<InvoiceStatusResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let invoice = match Bolt11Invoice::from_str(&payload.invoice) {
         Err(e) => return Err(APIError::InvalidInvoice(e.to_string())),
@@ -1855,7 +1928,8 @@ pub(crate) async fn issue_asset_cfa(
     WithRejection(Json(payload), _): WithRejection<Json<IssueAssetCFARequest>, APIError>,
 ) -> Result<Json<IssueAssetCFAResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         if *unlocked_state.rgb_send_lock.lock().unwrap() {
             return Err(APIError::OpenChannelInProgress);
@@ -1889,7 +1963,8 @@ pub(crate) async fn issue_asset_nia(
     WithRejection(Json(payload), _): WithRejection<Json<IssueAssetNIARequest>, APIError>,
 ) -> Result<Json<IssueAssetNIAResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         if *unlocked_state.rgb_send_lock.lock().unwrap() {
             return Err(APIError::OpenChannelInProgress);
@@ -1914,7 +1989,8 @@ pub(crate) async fn issue_asset_uda(
     WithRejection(Json(payload), _): WithRejection<Json<IssueAssetUDARequest>, APIError>,
 ) -> Result<Json<IssueAssetUDAResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         if *unlocked_state.rgb_send_lock.lock().unwrap() {
             return Err(APIError::OpenChannelInProgress);
@@ -1955,7 +2031,8 @@ pub(crate) async fn keysend(
     WithRejection(Json(payload), _): WithRejection<Json<KeysendRequest>, APIError>,
 ) -> Result<Json<KeysendResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let dest_pubkey = match hex_str_to_compressed_pubkey(&payload.dest_pubkey) {
             Some(pk) => pk,
@@ -2053,7 +2130,8 @@ pub(crate) async fn list_assets(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<ListAssetsRequest>, APIError>,
 ) -> Result<Json<ListAssetsResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let rgb_assets = unlocked_state.rgb_list_assets(
         payload
@@ -2129,7 +2207,8 @@ pub(crate) async fn list_assets(
 pub(crate) async fn list_channels(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListChannelsResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let mut channels = vec![];
     for chan_info in unlocked_state.channel_manager.list_channels() {
@@ -2205,7 +2284,8 @@ pub(crate) async fn list_channels(
 pub(crate) async fn list_payments(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListPaymentsResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let inbound_payments = unlocked_state.inbound_payments();
     let outbound_payments = unlocked_state.outbound_payments();
@@ -2270,7 +2350,8 @@ pub(crate) async fn get_payment(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<GetPaymentRequest>, APIError>,
 ) -> Result<Json<GetPaymentResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let payment_hash_vec = hex_str_to_vec(&payload.payment_hash);
     if payment_hash_vec.is_none() || payment_hash_vec.as_ref().unwrap().len() != 32 {
@@ -2346,7 +2427,8 @@ pub(crate) async fn get_payment(
 pub(crate) async fn list_peers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListPeersResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let mut peers = vec![];
     for peer_details in unlocked_state.peer_manager.list_peers() {
@@ -2365,7 +2447,8 @@ pub(crate) async fn list_peers(
 pub(crate) async fn list_swaps(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListSwapsResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let map_swap = |payment_hash: &PaymentHash, swap_data: &SwapData, taker: bool| {
         let mut status = swap_data.status.clone();
@@ -2416,7 +2499,8 @@ pub(crate) async fn get_swap(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<GetSwapRequest>, APIError>,
 ) -> Result<Json<GetSwapResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let payment_hash_vec = hex_str_to_vec(&payload.payment_hash);
     if payment_hash_vec.is_none() || payment_hash_vec.as_ref().unwrap().len() != 32 {
@@ -2477,7 +2561,8 @@ pub(crate) async fn list_transactions(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<ListTransactionsRequest>, APIError>,
 ) -> Result<Json<ListTransactionsResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let mut transactions = vec![];
     for tx in unlocked_state.rgb_list_transactions(payload.skip_sync)? {
@@ -2506,7 +2591,8 @@ pub(crate) async fn list_transfers(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<ListTransfersRequest>, APIError>,
 ) -> Result<Json<ListTransfersResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let mut transfers = vec![];
     for transfer in unlocked_state.rgb_list_transfers(payload.asset_id)? {
@@ -2555,7 +2641,8 @@ pub(crate) async fn list_unspents(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<ListUnspentsRequest>, APIError>,
 ) -> Result<Json<ListUnspentsResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let mut unspents = vec![];
     for unspent in unlocked_state.rgb_list_unspents(payload.skip_sync)? {
@@ -2584,7 +2671,8 @@ pub(crate) async fn ln_invoice(
     WithRejection(Json(payload), _): WithRejection<Json<LNInvoiceRequest>, APIError>,
 ) -> Result<Json<LNInvoiceResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let contract_id = if let Some(asset_id) = payload.asset_id {
             Some(ContractId::from_str(&asset_id).map_err(|_| APIError::InvalidAssetID(asset_id))?)
@@ -2715,7 +2803,8 @@ pub(crate) async fn maker_execute(
     WithRejection(Json(payload), _): WithRejection<Json<MakerExecuteRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let swapstring = SwapString::from_str(&payload.swapstring)
             .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
@@ -2830,13 +2919,13 @@ pub(crate) async fn maker_execute(
             .into_iter()
             .map(|mut hop| {
                 if swap_info.is_to_asset() {
-                    hop.rgb_amount = Some(swap_info.qty_to);
+                    hop.rgb_payment = Some((swap_info.to_asset.unwrap(), swap_info.qty_to));
                 }
                 hop
             })
             .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
                 if swap_info.is_from_asset() {
-                    hop.rgb_amount = Some(swap_info.qty_from);
+                    hop.rgb_payment = Some((swap_info.from_asset.unwrap(), swap_info.qty_from));
                 }
                 hop
             }))
@@ -2923,7 +3012,8 @@ pub(crate) async fn maker_init(
     WithRejection(Json(payload), _): WithRejection<Json<MakerInitRequest>, APIError>,
 ) -> Result<Json<MakerInitResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let from_asset = match &payload.from_asset {
             None => None,
@@ -2996,7 +3086,8 @@ pub(crate) async fn maker_init(
 pub(crate) async fn network_info(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<NetworkInfoResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let best_block = unlocked_state.channel_manager.current_best_block();
 
@@ -3009,7 +3100,8 @@ pub(crate) async fn network_info(
 pub(crate) async fn node_info(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<NodeInfoResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let chans = unlocked_state.channel_manager.list_channels();
 
@@ -3102,7 +3194,8 @@ pub(crate) async fn open_channel(
     WithRejection(Json(payload), _): WithRejection<Json<OpenChannelRequest>, APIError>,
 ) -> Result<Json<OpenChannelResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         if *unlocked_state.rgb_send_lock.lock().unwrap() {
             return Err(APIError::OpenChannelInProgress);
@@ -3250,7 +3343,7 @@ pub(crate) async fn open_channel(
             let recipient_map = map! {
                 asset_id => vec![Recipient {
                     recipient_id,
-                    witness_data: Some(WitnessData {
+                    witness_data: Some(RgbLibWitnessData {
                         amount_sat: payload.capacity_sat,
                         blinding: Some(STATIC_BLINDING + 1),
                     }),
@@ -3349,7 +3442,8 @@ pub(crate) async fn post_asset_media(
     mut multipart: Multipart,
 ) -> Result<Json<PostAssetMediaResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let digest = if let Some(field) = multipart
             .next_field()
@@ -3397,9 +3491,11 @@ pub(crate) async fn refresh_transfers(
     WithRejection(Json(payload), _): WithRejection<Json<RefreshRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state_copy = unlocked_state.clone();
 
-        tokio::task::spawn_blocking(move || unlocked_state.rgb_refresh(payload.skip_sync))
+        tokio::task::spawn_blocking(move || unlocked_state_copy.rgb_refresh(payload.skip_sync))
             .await
             .unwrap()?;
 
@@ -3453,15 +3549,19 @@ pub(crate) async fn rgb_invoice(
     WithRejection(Json(payload), _): WithRejection<Json<RgbInvoiceRequest>, APIError>,
 ) -> Result<Json<RgbInvoiceResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         if *unlocked_state.rgb_send_lock.lock().unwrap() {
             return Err(APIError::OpenChannelInProgress);
         }
 
+        let assignment = payload.assignment.unwrap_or(Assignment::Any).into();
+
         let receive_data = if payload.witness {
             unlocked_state.rgb_witness_receive(
                 payload.asset_id,
+                assignment,
                 payload.duration_seconds,
                 vec![unlocked_state.proxy_endpoint.clone()],
                 payload.min_confirmations,
@@ -3469,6 +3569,7 @@ pub(crate) async fn rgb_invoice(
         } else {
             unlocked_state.rgb_blind_receive(
                 payload.asset_id,
+                assignment,
                 payload.duration_seconds,
                 vec![unlocked_state.proxy_endpoint.clone()],
                 payload.min_confirmations,
@@ -3490,7 +3591,8 @@ pub(crate) async fn send_asset(
     WithRejection(Json(payload), _): WithRejection<Json<SendAssetRequest>, APIError>,
 ) -> Result<Json<SendAssetResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         if *unlocked_state.rgb_send_lock.lock().unwrap() {
             return Err(APIError::OpenChannelInProgress);
@@ -3500,14 +3602,15 @@ pub(crate) async fn send_asset(
         let recipient_map = map! {
             payload.asset_id => vec![Recipient {
                 recipient_id: payload.recipient_id,
-                witness_data: None,
+                witness_data: payload.witness_data.map(|w| w.into()),
                 assignment: payload.assignment.into(),
                 transport_endpoints: payload.transport_endpoints,
             }]
         };
 
+        let unlocked_state_copy = unlocked_state.clone();
         let send_result = tokio::task::spawn_blocking(move || {
-            unlocked_state.rgb_send(
+            unlocked_state_copy.rgb_send(
                 recipient_map,
                 payload.donation,
                 payload.fee_rate,
@@ -3530,7 +3633,8 @@ pub(crate) async fn send_btc(
     WithRejection(Json(payload), _): WithRejection<Json<SendBtcRequest>, APIError>,
 ) -> Result<Json<SendBtcResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let txid = unlocked_state.rgb_send_btc(
             payload.address,
@@ -3549,7 +3653,8 @@ pub(crate) async fn send_onion_message(
     WithRejection(Json(payload), _): WithRejection<Json<SendOnionMessageRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         if payload.node_ids.is_empty() {
             return Err(APIError::InvalidNodeIds(s!(
@@ -3613,7 +3718,8 @@ pub(crate) async fn send_payment(
     WithRejection(Json(payload), _): WithRejection<Json<SendPaymentRequest>, APIError>,
 ) -> Result<Json<SendPaymentResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         let mut status = HTLCStatus::Pending;
         let created_at = get_current_timestamp();
@@ -3800,7 +3906,8 @@ pub(crate) async fn sign_message(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<SignMessageRequest>, APIError>,
 ) -> Result<Json<SignMessageResponse>, APIError> {
-    let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
 
     let message = payload.message.trim();
     let signed_message = lightning::util::message_signing::sign(
@@ -3815,7 +3922,8 @@ pub(crate) async fn sync(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
 
         unlocked_state.rgb_sync()?;
 
@@ -3829,7 +3937,8 @@ pub(crate) async fn taker(
     WithRejection(Json(payload), _): WithRejection<Json<TakerRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
         let swapstring = SwapString::from_str(&payload.swapstring)
             .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
 

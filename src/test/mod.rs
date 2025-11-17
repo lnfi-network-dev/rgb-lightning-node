@@ -39,7 +39,7 @@ use crate::routes::{
     OpenChannelRequest, OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, RefreshRequest,
     RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest,
     SendAssetResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest, SendPaymentResponse,
-    Swap, SwapStatus, TakerRequest, Transaction, Transfer, UnlockRequest, Unspent,
+    Swap, SwapStatus, TakerRequest, Transaction, Transfer, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{hex_str_to_vec, ELECTRUM_URL_REGTEST, PROXY_ENDPOINT_LOCAL};
 
@@ -50,6 +50,8 @@ const NODE1_PEER_PORT: u16 = 9801;
 const NODE2_PEER_PORT: u16 = 9802;
 const NODE3_PEER_PORT: u16 = 9803;
 const NODE4_PEER_PORT: u16 = 9804;
+const NODE5_PEER_PORT: u16 = 9805;
+const NODE6_PEER_PORT: u16 = 9806;
 
 static INIT: Once = Once::new();
 
@@ -1106,7 +1108,55 @@ async fn open_channel(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn open_channel_with_custom_data(
+async fn open_channel_with_retry(
+    node_address: SocketAddr,
+    dest_peer_pubkey: &str,
+    dest_peer_port: Option<u16>,
+    capacity_sat: Option<u64>,
+    push_msat: Option<u64>,
+    asset_amount: Option<u64>,
+    asset_id: Option<&str>,
+    max_retries: u32,
+) -> Channel {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let result = open_channel_raw(
+            node_address,
+            dest_peer_pubkey,
+            dest_peer_port,
+            capacity_sat,
+            push_msat,
+            asset_amount,
+            asset_id,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await;
+
+        match result {
+            Ok(channel) => return channel,
+            Err(status) if status == reqwest::StatusCode::FORBIDDEN && attempt < max_retries => {
+                println!(
+                    "Channel opening in progress (attempt {}/{}), retrying in 5s...",
+                    attempt, max_retries
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            Err(status) => {
+                panic!(
+                    "Failed to open channel after {} attempts with status: {}",
+                    attempt, status
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_channel_raw(
     node_address: SocketAddr,
     dest_peer_pubkey: &str,
     dest_peer_port: Option<u16>,
@@ -1118,12 +1168,25 @@ async fn open_channel_with_custom_data(
     fee_proportional_millionths: Option<u32>,
     temporary_channel_id: Option<&str>,
     with_anchors: bool,
-) -> Channel {
+) -> Result<Channel, reqwest::StatusCode> {
     println!(
         "opening channel with {asset_amount:?} of asset {asset_id:?} from node {node_address} \
               to {dest_peer_pubkey}"
     );
-    stop_mining();
+
+    let blockcount = get_block_count();
+    let t_0 = OffsetDateTime::now_utc();
+    loop {
+        let net_info = network_info(node_address).await;
+        if net_info.height == blockcount {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 10.0 {
+            panic!("height is not syncing");
+        }
+    }
+
     let peer_pubkey_and_opt_addr = if let Some(p) = dest_peer_port {
         format!("{dest_peer_pubkey}@127.0.0.1:{p}")
     } else {
@@ -1147,11 +1210,13 @@ async fn open_channel_with_custom_data(
         .send()
         .await
         .unwrap();
-    _check_response_is_ok(res)
-        .await
-        .json::<OpenChannelResponse>()
-        .await
-        .unwrap();
+
+    let status = res.status();
+    if !status.is_success() {
+        return Err(status);
+    }
+
+    res.json::<OpenChannelResponse>().await.unwrap();
 
     let t_0 = OffsetDateTime::now_utc();
     let mut channel_id = None;
@@ -1168,7 +1233,7 @@ async fn open_channel_with_custom_data(
             if channel.funding_txid.is_some() {
                 let txout = _get_txout(channel.funding_txid.as_ref().unwrap());
                 if !txout.is_empty() {
-                    mine_n_blocks(true, 6);
+                    mine_n_blocks(false, 6);
                     channel_id = Some(channel.channel_id.clone());
                     channel_funded = true;
                     continue;
@@ -1190,12 +1255,43 @@ async fn open_channel_with_custom_data(
             .find(|c| c.channel_id == channel_id)
             .unwrap();
         if channel.ready {
-            return channel.clone();
+            return Ok(channel.clone());
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 10.0 {
             panic!("channel is taking too long to be ready")
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_channel_with_custom_data(
+    node_address: SocketAddr,
+    dest_peer_pubkey: &str,
+    dest_peer_port: Option<u16>,
+    capacity_sat: Option<u64>,
+    push_msat: Option<u64>,
+    asset_amount: Option<u64>,
+    asset_id: Option<&str>,
+    fee_base_msat: Option<u32>,
+    fee_proportional_millionths: Option<u32>,
+    temporary_channel_id: Option<&str>,
+    with_anchors: bool,
+) -> Channel {
+    open_channel_raw(
+        node_address,
+        dest_peer_pubkey,
+        dest_peer_port,
+        capacity_sat,
+        push_msat,
+        asset_amount,
+        asset_id,
+        fee_base_msat,
+        fee_proportional_millionths,
+        temporary_channel_id,
+        with_anchors,
+    )
+    .await
+    .expect("channel opening should succeed")
 }
 
 async fn post_asset_media(node_address: SocketAddr, file_path: &str) -> String {
@@ -1257,6 +1353,15 @@ async fn rgb_invoice(
     asset_id: Option<String>,
     witness: bool,
 ) -> RgbInvoiceResponse {
+    rgb_invoice_with_assignment(node_address, asset_id, None, witness).await
+}
+
+async fn rgb_invoice_with_assignment(
+    node_address: SocketAddr,
+    asset_id: Option<String>,
+    assignment: Option<Assignment>,
+    witness: bool,
+) -> RgbInvoiceResponse {
     println!(
         "generating RGB invoice{} for node {node_address}",
         if let Some(id) = asset_id.as_ref() {
@@ -1268,6 +1373,7 @@ async fn rgb_invoice(
     let payload = RgbInvoiceRequest {
         min_confirmations: 1,
         asset_id,
+        assignment,
         duration_seconds: None,
         witness,
     };
@@ -1289,6 +1395,7 @@ async fn send_asset(
     asset_id: &str,
     assignment: Assignment,
     recipient_id: String,
+    witness_data: Option<WitnessData>,
 ) {
     println!(
         "sending on-chain {assignment:?} of asset {asset_id} from node {node_address} to {recipient_id}"
@@ -1297,6 +1404,7 @@ async fn send_asset(
         asset_id: asset_id.to_string(),
         assignment,
         recipient_id,
+        witness_data,
         donation: true,
         fee_rate: FEE_RATE,
         min_confirmations: 1,
@@ -1667,8 +1775,7 @@ fn resume_mining() {
         .resume_mining()
 }
 
-fn wait_electrs_sync() {
-    let t_0 = OffsetDateTime::now_utc();
+fn get_block_count() -> u32 {
     let output = Command::new("docker")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -1680,10 +1787,15 @@ fn wait_electrs_sync() {
     assert!(output.status.success());
     let blockcount_str =
         std::str::from_utf8(&output.stdout).expect("could not parse blockcount output");
-    let blockcount = blockcount_str
+    blockcount_str
         .trim()
         .parse::<u32>()
-        .expect("could not parse blockcount");
+        .expect("could not parse blockcount")
+}
+
+fn wait_electrs_sync() {
+    let t_0 = OffsetDateTime::now_utc();
+    let blockcount = get_block_count();
     loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let mut all_synced = true;
@@ -1745,6 +1857,7 @@ mod close_force_nobtc_acceptor;
 mod close_force_other_side;
 mod close_force_standard;
 mod concurrent_btc_payments;
+mod concurrent_openchannel;
 mod fail_transfers;
 mod getchannelid;
 mod htlc_amount_checks;
@@ -1761,6 +1874,7 @@ mod payment;
 mod refuse_high_fees;
 mod restart;
 mod send_receive;
+mod swap_assets_liquidity_both_ways;
 mod swap_reverse_same_channel;
 mod swap_roundtrip_assets;
 mod swap_roundtrip_buy;

@@ -71,15 +71,18 @@ shared regtest services provided by docker compose:
 ```sh
 # 1st shell
 rgb-lightning-node dataldk0/ --daemon-listening-port 3001 \
-    --ldk-peer-listening-port 9735 --network regtest
+    --ldk-peer-listening-port 9735 --network regtest \
+    --disable-authentication
 
 # 2nd shell
 rgb-lightning-node dataldk1/ --daemon-listening-port 3002 \
-    --ldk-peer-listening-port 9736 --network regtest
+    --ldk-peer-listening-port 9736 --network regtest \
+    --disable-authentication
 
 # 3rd shell
 rgb-lightning-node dataldk2/ --daemon-listening-port 3003 \
-    --ldk-peer-listening-port 9737 --network regtest
+    --ldk-peer-listening-port 9737 --network regtest \
+    --disable-authentication
 ```
 
 To send some bitcoins to a node, first get a bitcoin address with the POST
@@ -122,15 +125,18 @@ external testnet services:
 ```sh
 # 1st shell
 rgb-lightning-node dataldk0/ --daemon-listening-port 3001 \
-    --ldk-peer-listening-port 9735 --network testnet
+    --ldk-peer-listening-port 9735 --network testnet \
+    --disable-authentication
 
 # 2nd shell
 rgb-lightning-node dataldk1/ --daemon-listening-port 3002 \
-    --ldk-peer-listening-port 9736 --network testnet
+    --ldk-peer-listening-port 9736 --network testnet \
+    --disable-authentication
 
 # 3rd shell
 rgb-lightning-node dataldk2/ --daemon-listening-port 3003 \
-    --ldk-peer-listening-port 9737 --network testnet
+    --ldk-peer-listening-port 9737 --network testnet \
+    --disable-authentication
 ```
 
 When unlocking testnet nodes you can use the following services:
@@ -337,6 +343,7 @@ Here is a list of projects using RLN, in alphabetical order:
 - [Lnfi]
 - [Spectrum]
 - [Thunderstack]
+- [Tiramisu Wallet]
 
 
 [Biscuit tokens]: https://www.biscuitsec.org/
@@ -350,3 +357,4 @@ Here is a list of projects using RLN, in alphabetical order:
 [Lnfi]: https://www.lnfi.network/
 [Spectrum]: https://rgbspectrum.pages.dev/
 [Thunderstack]: https://thunderstack.org/
+[Tiramisu Wallet]: https://mainnet.tiramisuwallet.com/
