@@ -758,7 +758,7 @@ async fn handle_ldk_events(
                                     "EVENT: No payment preimage found for payment hash {}",
                                     payment_hash
                                 );
-                                return;
+                                return Ok(());
                             }
                         },
                         None => {
@@ -766,7 +766,7 @@ async fn handle_ldk_events(
                                 "EVENT: No payment info found for payment hash {}",
                                 payment_hash
                             );
-                            return;
+                            return Ok(());
                         }
                     }
                 }
