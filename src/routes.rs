@@ -1182,6 +1182,7 @@ pub(crate) struct UnlockRequest {
 pub(crate) struct Unspent {
     pub(crate) utxo: Utxo,
     pub(crate) rgb_allocations: Vec<RgbAllocation>,
+    pub(crate) pending_blinded: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2491,6 +2492,7 @@ pub(crate) async fn list_unspents(
                     settled: a.settled,
                 })
                 .collect(),
+            pending_blinded: unspent.pending_blinded,
         })
     }
     Ok(Json(ListUnspentsResponse { unspents }))
