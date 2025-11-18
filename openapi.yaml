@@ -2570,6 +2570,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RgbAllocation'
+        pending_blinded:
+          type: integer
+          description: Number of pending blind receive operations
+          example: 0
     Utxo:
       type: object
       properties:
