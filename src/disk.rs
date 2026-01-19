@@ -2,6 +2,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use chrono::Utc;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
+use lightning::util::hash_tables::new_hash_map;
 use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{Readable, ReadableArgs, Writer};
 use std::collections::HashMap;
@@ -164,7 +165,7 @@ pub(crate) fn read_inbound_payment_info(path: &Path) -> InboundPaymentInfoStorag
         }
     }
     InboundPaymentInfoStorage {
-        payments: HashMap::new(),
+        payments: new_hash_map(),
     }
 }
 
@@ -175,7 +176,7 @@ pub(crate) fn read_outbound_payment_info(path: &Path) -> OutboundPaymentInfoStor
         }
     }
     OutboundPaymentInfoStorage {
-        payments: HashMap::new(),
+        payments: new_hash_map(),
     }
 }
 
@@ -185,7 +186,7 @@ pub(crate) fn read_output_spender_txes(path: &Path) -> OutputSpenderTxes {
             return info;
         }
     }
-    HashMap::new()
+    new_hash_map()
 }
 
 pub(crate) fn read_swaps_info(path: &Path) -> SwapMap {
@@ -195,7 +196,7 @@ pub(crate) fn read_swaps_info(path: &Path) -> SwapMap {
         }
     }
     SwapMap {
-        swaps: HashMap::new(),
+        swaps: new_hash_map(),
     }
 }
 
@@ -221,7 +222,7 @@ pub(crate) fn read_channel_ids_info(path: &Path) -> ChannelIdsMap {
         }
     }
     ChannelIdsMap {
-        channel_ids: HashMap::new(),
+        channel_ids: new_hash_map(),
     }
 }
 

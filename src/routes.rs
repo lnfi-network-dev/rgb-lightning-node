@@ -17,7 +17,7 @@ use lightning::ln::invoice_utils::{
     create_invoice_from_channelmanager,
     create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_hash,
 };
-use lightning::ln::types::ChannelId;
+use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
 use lightning::rgb_utils::{
@@ -33,10 +33,12 @@ use lightning::{
     ln::channel_state::ChannelShutdownState, onion_message::messenger::MessageSendInstructions,
 };
 use lightning::{
-    ln::{
-        channelmanager::{PaymentId, RecipientOnionFields, Retry},
-        PaymentHash, PaymentPreimage,
-    },
+    ln::channelmanager::Bolt11InvoiceParameters,
+    routing::router::RouteParametersConfig,
+    types::payment::{PaymentHash, PaymentPreimage},
+};
+use lightning::{
+    ln::channelmanager::{PaymentId, RecipientOnionFields, Retry},
     rgb_utils::{write_rgb_channel_info, write_rgb_payment_info_file, RgbInfo},
     routing::{
         gossip::NodeId,
@@ -45,7 +47,6 @@ use lightning::{
     util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig},
     util::{errors::APIError as LDKAPIError, IS_SWAP_SCID},
 };
-use lightning_invoice::Currency;
 use lightning_invoice::{Bolt11Invoice, PaymentSecret};
 use regex::Regex;
 use rgb_lib::{
@@ -175,7 +176,9 @@ pub(crate) struct AssetMetadataRequest {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AssetMetadataResponse {
     pub(crate) asset_schema: AssetSchema,
-    pub(crate) issued_supply: u64,
+    pub(crate) initial_supply: u64,
+    pub(crate) max_supply: u64,
+    pub(crate) known_circulating_supply: u64,
     pub(crate) timestamp: i64,
     pub(crate) name: String,
     pub(crate) precision: u8,
@@ -279,7 +282,6 @@ pub(crate) struct AssetUDA {
     pub(crate) name: String,
     pub(crate) details: Option<String>,
     pub(crate) precision: u8,
-    pub(crate) issued_supply: u64,
     pub(crate) timestamp: i64,
     pub(crate) added_at: i64,
     pub(crate) balance: AssetBalanceResponse,
@@ -294,7 +296,6 @@ impl From<RgbLibAssetUDA> for AssetUDA {
             name: value.name,
             details: value.details,
             precision: value.precision,
-            issued_supply: value.issued_supply,
             timestamp: value.timestamp,
             added_at: value.added_at,
             balance: value.balance.into(),
@@ -347,6 +348,7 @@ pub(crate) struct BackupRequest {
 pub(crate) enum BitcoinNetwork {
     Mainnet,
     Testnet,
+    Testnet4,
     Signet,
     Regtest,
 }
@@ -356,6 +358,7 @@ impl From<Network> for BitcoinNetwork {
         match x {
             Network::Bitcoin => Self::Mainnet,
             Network::Testnet => Self::Testnet,
+            Network::Testnet4 => Self::Testnet4,
             Network::Regtest => Self::Regtest,
             Network::Signet => Self::Signet,
             _ => unimplemented!("unsupported network"),
@@ -368,6 +371,7 @@ impl From<RgbLibNetwork> for BitcoinNetwork {
         match x {
             RgbLibNetwork::Mainnet => Self::Mainnet,
             RgbLibNetwork::Testnet => Self::Testnet,
+            RgbLibNetwork::Testnet4 => Self::Testnet4,
             RgbLibNetwork::Regtest => Self::Regtest,
             RgbLibNetwork::Signet => Self::Signet,
         }
@@ -1183,6 +1187,7 @@ pub(crate) enum TransferKind {
     ReceiveBlind,
     ReceiveWitness,
     Send,
+    Inflation,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -1482,7 +1487,9 @@ pub(crate) async fn asset_metadata(
 
     Ok(Json(AssetMetadataResponse {
         asset_schema: metadata.asset_schema.into(),
-        issued_supply: metadata.issued_supply,
+        initial_supply: metadata.initial_supply,
+        max_supply: metadata.max_supply,
+        known_circulating_supply: metadata.known_circulating_supply,
         timestamp: metadata.timestamp,
         name: metadata.name,
         precision: metadata.precision,
@@ -2093,15 +2100,13 @@ pub(crate) async fn keysend(
             );
         }
 
-        let status = match unlocked_state
-            .channel_manager
-            .send_spontaneous_payment_with_retry(
-                Some(payment_preimage),
-                RecipientOnionFields::spontaneous_empty(),
-                payment_id,
-                route_params,
-                Retry::Timeout(Duration::from_secs(10)),
-            ) {
+        let status = match unlocked_state.channel_manager.send_spontaneous_payment(
+            Some(payment_preimage),
+            RecipientOnionFields::spontaneous_empty(),
+            payment_id,
+            route_params,
+            Retry::Timeout(Duration::from_secs(10)),
+        ) {
             Ok(_payment_hash) => {
                 tracing::info!(
                     "EVENT: initiated sending {} msats to {}",
@@ -2239,7 +2244,10 @@ pub(crate) async fn list_channels(
 
         if let Some(funding_txo) = chan_info.funding_txo {
             channel.funding_txid = Some(funding_txo.txid.to_string());
-            if let Ok(chan_monitor) = unlocked_state.chain_monitor.get_monitor(funding_txo) {
+            if let Ok(chan_monitor) = unlocked_state
+                .chain_monitor
+                .get_monitor(chan_info.channel_id)
+            {
                 channel.local_balance_sat = chan_monitor
                     .get_claimable_balances()
                     .iter()
@@ -2615,6 +2623,7 @@ pub(crate) async fn list_transfers(
                 rgb_lib::TransferKind::ReceiveBlind => TransferKind::ReceiveBlind,
                 rgb_lib::TransferKind::ReceiveWitness => TransferKind::ReceiveWitness,
                 rgb_lib::TransferKind::Send => TransferKind::Send,
+                rgb_lib::TransferKind::Inflation => TransferKind::Inflation,
             },
             txid: transfer.txid,
             recipient_id: transfer.recipient_id,
@@ -2726,18 +2735,18 @@ pub(crate) async fn ln_invoice(
                 };
             (invoice, Some(preimage))
         } else {
-            let invoice = match create_invoice_from_channelmanager(
-                &unlocked_state.channel_manager,
-                unlocked_state.keys_manager.clone(),
-                state.static_state.logger.clone(),
-                currency,
-                payload.amt_msat,
-                description,
-                payload.expiry_sec,
-                None,
+            let invoice_params = Bolt11InvoiceParameters {
+                amount_msats: payload.amt_msat,
+                invoice_expiry_delta_secs: Some(payload.expiry_sec),
                 contract_id,
-                payload.asset_amount,
-            ) {
+                asset_amount: payload.asset_amount,
+                ..Default::default()
+            };
+    
+            let invoice = match unlocked_state
+                .channel_manager
+                .create_bolt11_invoice(invoice_params)
+            {
                 Ok(inv) => inv,
                 Err(e) => return Err(APIError::FailedInvoiceCreation(e.to_string())),
             };
@@ -2979,13 +2988,17 @@ pub(crate) async fn maker_execute(
 
         unlocked_state.update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Pending);
 
-        let (_status, err) = match unlocked_state.channel_manager.send_spontaneous_payment(
-            &route,
-            Some(payment_preimage),
-            RecipientOnionFields::spontaneous_empty(),
-            PaymentId(swapstring.payment_hash.0),
-        ) {
-            Ok(_payment_hash) => {
+        let payment_hash: PaymentHash = payment_preimage.into();
+        let (_status, err) = match unlocked_state
+            .channel_manager
+            .send_spontaneous_payment_with_route(
+                route,
+                payment_hash,
+                payment_preimage,
+                RecipientOnionFields::spontaneous_empty(),
+                PaymentId(swapstring.payment_hash.0),
+            ) {
+            Ok(()) => {
                 tracing::debug!("EVENT: initiated swap");
                 (HTLCStatus::Pending, None)
             }
@@ -3113,9 +3126,10 @@ pub(crate) async fn node_info(
 
     let close_fees_map = |b| match b {
         &Balance::ClaimableOnChannelClose {
-            transaction_fee_satoshis,
+            ref balance_candidates,
+            confirmed_balance_candidate_index,
             ..
-        } => transaction_fee_satoshis,
+        } => balance_candidates[confirmed_balance_candidate_index].transaction_fee_satoshis,
         _ => 0,
     };
     let eventual_close_fees_sat = balances.iter().map(close_fees_map).sum::<u64>();
@@ -3756,14 +3770,16 @@ pub(crate) async fn send_payment(
                     amt_msat: Some(amt_msat),
                     created_at,
                     updated_at: created_at,
-                    payee_pubkey: offer.signing_pubkey().ok_or(APIError::InvalidInvoice(s!("missing signing pubkey")))?,
+                    payee_pubkey: offer.issuer_signing_pubkey().ok_or(APIError::InvalidInvoice(s!("missing signing pubkey")))?,
                 },
             )?;
 
-            let retry = Retry::Timeout(Duration::from_secs(10));
-            let amt = Some(amt_msat);
+            let params = OptionalOfferPaymentParams {
+                retry_strategy: Retry::Timeout(Duration::from_secs(10)),
+                ..Default::default()
+            };
             let pay = unlocked_state.channel_manager
-                .pay_for_offer(&offer, None, amt, None, payment_id, retry, None);
+                .pay_for_offer(&offer, Some(amt_msat), payment_id, params);
             if pay.is_err() {
                 tracing::error!("ERROR: failed to pay: {:?}", pay);
                 unlocked_state.update_outbound_payment_status(payment_id, HTLCStatus::Failed);
@@ -3781,9 +3797,10 @@ pub(crate) async fn send_payment(
             let payment_secret = Some(*invoice.payment_secret());
             let zero_amt_invoice =
                 invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
-            let (pay_params_opt, amt_msat) = if zero_amt_invoice {
+
+            let amt_msat = if zero_amt_invoice {
                 if let Some(amt_msat) = payload.amt_msat {
-                    (payment_parameters_from_zero_amount_invoice(&invoice, amt_msat), amt_msat)
+                    amt_msat
                 } else {
                     return Err(APIError::InvalidAmount(s!(
                         "need an amount for the given 0-value invoice"
@@ -3796,15 +3813,7 @@ pub(crate) async fn send_payment(
                         "amount didn't match invoice value of {}msat", invoice.amount_milli_satoshis().unwrap_or(0)
                     )));
                 }
-                (payment_parameters_from_invoice(&invoice), invoice.amount_milli_satoshis().unwrap_or(0))
-            };
-            let (payment_hash, recipient_onion, route_params) = match pay_params_opt {
-                Ok(res) => res,
-                Err(e) => {
-                    return Err(APIError::InvalidInvoice(format!(
-                        "failed to parse invoice: {e:?}"
-                    )));
-                },
+                invoice.amount_milli_satoshis().unwrap_or(0)
             };
 
             let rgb_payment = match (invoice.rgb_contract_id(), invoice.rgb_amount()) {
@@ -3842,6 +3851,7 @@ pub(crate) async fn send_payment(
                     payee_pubkey: invoice.get_payee_pub_key(),
                 },
             )?;
+            let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
             if let Some((contract_id, rgb_amount)) = rgb_payment {
                 write_rgb_payment_info_file(
                     &PathBuf::from(&state.static_state.ldk_data_dir),
@@ -3853,11 +3863,11 @@ pub(crate) async fn send_payment(
                 );
             }
 
-            match unlocked_state.channel_manager.send_payment(
-                payment_hash,
-                recipient_onion,
+            match unlocked_state.channel_manager.pay_for_bolt11_invoice(
+                &invoice,
                 payment_id,
-                route_params,
+                Some(amt_msat),
+                RouteParametersConfig::default(),
                 Retry::Timeout(Duration::from_secs(10)),
             ) {
                 Ok(_) => {

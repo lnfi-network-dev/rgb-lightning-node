@@ -1141,7 +1141,13 @@ components:
       properties:
         asset_schema:
           $ref: '#/components/schemas/AssetSchema'
-        issued_supply:
+        initial_supply:
+          type: integer
+          example: 777
+        max_supply:
+          type: integer
+          example: 777
+        known_circulating_supply:
           type: integer
           example: 777
         timestamp:
@@ -1244,9 +1250,6 @@ components:
         precision:
           type: integer
           example: 0
-        issued_supply:
-          type: integer
-          example: 777
         timestamp:
           type: integer
           example: 1691160565
@@ -1331,6 +1334,7 @@ components:
       enum:
         - Mainnet
         - Testnet
+        - Testnet4
         - Signet
         - Regtest
     BlockTime:
@@ -2507,6 +2511,7 @@ components:
         - ReceiveBlind
         - ReceiveWitness
         - Send
+        - Inflation
     TransferStatus:
       type: string
       enum:
