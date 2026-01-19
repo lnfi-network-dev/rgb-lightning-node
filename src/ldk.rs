@@ -173,12 +173,30 @@ impl_writeable_tlv_based!(ChannelIdsMap, {
 });
 
 pub(crate) struct WebhookStorage {
-    pub(crate) subscriptions: HashMap<String, crate::routes::WebhookSubscription>,
+    pub(crate) subscriptions: Vec<crate::routes::WebhookSubscription>,
 }
 
-impl_writeable_tlv_based!(WebhookStorage, {
-    (0, subscriptions, required),
-});
+impl lightning::util::ser::Writeable for WebhookStorage {
+    fn write<W: lightning::util::ser::Writer>(&self, writer: &mut W) -> Result<(), bitcoin::io::Error> {
+        (self.subscriptions.len() as u16).write(writer)?;
+        for subscription in &self.subscriptions {
+            subscription.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl lightning::util::ser::Readable for WebhookStorage {
+    fn read<R: bitcoin::io::Read>(reader: &mut R) -> Result<Self, lightning::ln::msgs::DecodeError> {
+        use lightning::util::ser::Readable;
+        let len: u16 = Readable::read(reader)?;
+        let mut subscriptions = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            subscriptions.push(Readable::read(reader)?);
+        }
+        Ok(WebhookStorage { subscriptions })
+    }
+}
 
 impl UnlockedAppState {
     pub(crate) fn add_maker_swap(&self, payment_hash: PaymentHash, swap: SwapData) {
@@ -416,21 +434,21 @@ impl UnlockedAppState {
         subscription: crate::routes::WebhookSubscription,
     ) {
         let mut webhooks = self.get_webhook_subscriptions_storage();
-        webhooks
-            .subscriptions
-            .insert(subscription.id.clone(), subscription);
+        // Remove existing subscription with same id if exists
+        webhooks.subscriptions.retain(|s| s.id != subscription.id);
+        webhooks.subscriptions.push(subscription);
         self.save_webhook_subscriptions(webhooks);
     }
 
     pub(crate) fn remove_webhook_subscription(&self, subscription_id: &str) {
         let mut webhooks = self.get_webhook_subscriptions_storage();
-        webhooks.subscriptions.remove(subscription_id);
+        webhooks.subscriptions.retain(|s| s.id != subscription_id);
         self.save_webhook_subscriptions(webhooks);
     }
 
     pub(crate) fn get_webhook_subscriptions(&self) -> Vec<crate::routes::WebhookSubscription> {
         let webhooks = self.get_webhook_subscriptions_storage();
-        webhooks.subscriptions.values().cloned().collect()
+        webhooks.subscriptions.clone()
     }
 
     fn get_webhook_subscriptions_storage(&self) -> MutexGuard<WebhookStorage> {
@@ -439,7 +457,7 @@ impl UnlockedAppState {
 
     fn save_webhook_subscriptions(&self, webhooks: MutexGuard<WebhookStorage>) {
         self.fs_store
-            .write("", "", WEBHOOK_SUBSCRIPTIONS_FNAME, &webhooks.encode())
+            .write("", "", WEBHOOK_SUBSCRIPTIONS_FNAME, webhooks.encode())
             .unwrap();
     }
 

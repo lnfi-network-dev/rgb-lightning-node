@@ -233,6 +233,6 @@ pub(crate) fn read_webhook_subscriptions(path: &Path) -> WebhookStorage {
         }
     }
     WebhookStorage {
-        subscriptions: HashMap::new(),
+        subscriptions: Vec::new(),
     }
 }

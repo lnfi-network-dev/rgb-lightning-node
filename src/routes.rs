@@ -10,13 +10,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf};
 use hex::DisplayHex;
-use lightning::ln::bolt11_payment::{
-    payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
-};
-use lightning::ln::invoice_utils::{
-    create_invoice_from_channelmanager,
-    create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_hash,
-};
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
@@ -47,7 +40,7 @@ use lightning::{
     util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig},
     util::{errors::APIError as LDKAPIError, IS_SWAP_SCID},
 };
-use lightning_invoice::{Bolt11Invoice, PaymentSecret};
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description, PaymentSecret};
 use regex::Regex;
 use rgb_lib::{
     generate_keys,
@@ -2695,17 +2688,6 @@ pub(crate) async fn ln_invoice(
             )));
         }
 
-        let currency = match state.static_state.network {
-            RgbLibNetwork::Mainnet => Currency::Bitcoin,
-            RgbLibNetwork::Testnet => Currency::BitcoinTestnet,
-            RgbLibNetwork::Regtest => Currency::Regtest,
-            RgbLibNetwork::Signet => Currency::Signet,
-        };
-
-        let description = payload
-            .memo
-            .unwrap_or_else(|| "ldk-tutorial-node".to_string());
-
         let (invoice, preimage_opt) = if let Some(ref preimage_hex) = payload.preimage {
             let preimage_bytes = hex_str_to_vec(&preimage_hex)
                 .and_then(|data| data.try_into().ok())
@@ -2713,26 +2695,31 @@ pub(crate) async fn ln_invoice(
             let preimage = PaymentPreimage(preimage_bytes);
             let payment_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
 
-            let invoice =
-                match create_invoice_from_channelmanager_and_duration_since_epoch_with_payment_hash(
-                    &unlocked_state.channel_manager,
-                    unlocked_state.keys_manager.clone(),
-                    state.static_state.logger.clone(),
-                    currency,
-                    payload.amt_msat,
-                    description,
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                        .expect("for the foreseeable future this shouldn't happen"),
-                    payload.expiry_sec,
-                    payment_hash,
-                    None,
-                    contract_id,
-                    payload.asset_amount,
-                ) {
-                    Ok(inv) => inv,
-                    Err(e) => return Err(APIError::FailedInvoiceCreation(e.to_string())),
-                };
+            let description = payload
+            .memo
+            .unwrap_or_else(|| "ldk-tutorial-node".to_string());
+
+            let description_obj = Description::new(description)
+                .map_err(|e| APIError::FailedInvoiceCreation(e.to_string()))?;
+            let description_param = Bolt11InvoiceDescription::Direct(description_obj);
+
+            let invoice_params = Bolt11InvoiceParameters {
+                amount_msats: payload.amt_msat,
+                description: description_param,
+                invoice_expiry_delta_secs: Some(payload.expiry_sec),
+                min_final_cltv_expiry_delta: None,
+                payment_hash: Some(payment_hash),
+                contract_id,
+                asset_amount: payload.asset_amount,
+            };
+
+            let invoice = match unlocked_state
+                .channel_manager
+                .create_bolt11_invoice(invoice_params)
+            {
+                Ok(inv) => inv,
+                Err(e) => return Err(APIError::FailedInvoiceCreation(e.to_string())),
+            };
             (invoice, Some(preimage))
         } else {
             let invoice_params = Bolt11InvoiceParameters {
