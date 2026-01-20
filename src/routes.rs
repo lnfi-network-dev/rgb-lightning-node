@@ -2696,8 +2696,8 @@ pub(crate) async fn ln_invoice(
             let payment_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
 
             let description = payload
-            .memo
-            .unwrap_or_else(|| "ldk-tutorial-node".to_string());
+                .memo
+                .unwrap_or_else(|| "ldk-tutorial-node".to_string());
 
             let description_obj = Description::new(description)
                 .map_err(|e| APIError::FailedInvoiceCreation(e.to_string()))?;
@@ -2729,7 +2729,7 @@ pub(crate) async fn ln_invoice(
                 asset_amount: payload.asset_amount,
                 ..Default::default()
             };
-    
+
             let invoice = match unlocked_state
                 .channel_manager
                 .create_bolt11_invoice(invoice_params)

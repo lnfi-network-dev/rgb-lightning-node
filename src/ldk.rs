@@ -177,7 +177,10 @@ pub(crate) struct WebhookStorage {
 }
 
 impl lightning::util::ser::Writeable for WebhookStorage {
-    fn write<W: lightning::util::ser::Writer>(&self, writer: &mut W) -> Result<(), bitcoin::io::Error> {
+    fn write<W: lightning::util::ser::Writer>(
+        &self,
+        writer: &mut W,
+    ) -> Result<(), bitcoin::io::Error> {
         (self.subscriptions.len() as u16).write(writer)?;
         for subscription in &self.subscriptions {
             subscription.write(writer)?;
@@ -187,7 +190,9 @@ impl lightning::util::ser::Writeable for WebhookStorage {
 }
 
 impl lightning::util::ser::Readable for WebhookStorage {
-    fn read<R: bitcoin::io::Read>(reader: &mut R) -> Result<Self, lightning::ln::msgs::DecodeError> {
+    fn read<R: bitcoin::io::Read>(
+        reader: &mut R,
+    ) -> Result<Self, lightning::ln::msgs::DecodeError> {
         use lightning::util::ser::Readable;
         let len: u16 = Readable::read(reader)?;
         let mut subscriptions = Vec::with_capacity(len as usize);
