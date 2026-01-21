@@ -1,0 +1,39 @@
+name: Build
+
+on:
+  push:
+    branches: [ "feature-lnfi" ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ "feature-lnfi" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    timeout-minutes: 30
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [ nightly, stable, 1.85.0 ]
+        name: [ linux, windows, macos ]
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: windows
+            os: windows-latest
+          - name: macos
+            os: macos-latest
+    steps:
+      - uses: ilammy/setup-nasm@v1
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{matrix.toolchain}}
+          rustflags: ""
+      - name: Build
+        run: cargo build --release
