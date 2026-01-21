@@ -2,7 +2,9 @@ name: Build
 
 on:
   push:
-    tags: [ 'v*' ]
+    branches: [ "feature-lnfi" ]
+  pull_request:
+    branches: [ "feature-lnfi" ]
 
 env:
   CARGO_TERM_COLOR: always
