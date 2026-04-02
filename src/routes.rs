@@ -772,6 +772,7 @@ pub(crate) struct LNInvoiceRequest {
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_amount: Option<u64>,
     pub(crate) preimage: Option<String>,
+    pub(crate) payment_hash: Option<String>,
     pub(crate) memo: Option<String>,
 }
 
@@ -2688,8 +2689,14 @@ pub(crate) async fn ln_invoice(
             )));
         }
 
+        if payload.preimage.is_some() && payload.payment_hash.is_some() {
+            return Err(APIError::FailedInvoiceCreation(
+                "cannot specify both preimage and payment_hash".to_string(),
+            ));
+        }
+
         let (invoice, preimage_opt) = if let Some(ref preimage_hex) = payload.preimage {
-            let preimage_bytes = hex_str_to_vec(&preimage_hex)
+            let preimage_bytes = hex_str_to_vec(preimage_hex)
                 .and_then(|data| data.try_into().ok())
                 .ok_or_else(|| APIError::InvalidPaymentPreimage)?;
             let preimage = PaymentPreimage(preimage_bytes);
@@ -2721,6 +2728,40 @@ pub(crate) async fn ln_invoice(
                 Err(e) => return Err(APIError::FailedInvoiceCreation(e.to_string())),
             };
             (invoice, Some(preimage))
+        } else if let Some(ref hash_hex) = payload.payment_hash {
+            let hash_bytes: [u8; 32] = hex_str_to_vec(hash_hex)
+                .and_then(|data| data.try_into().ok())
+                .ok_or_else(|| {
+                    APIError::InvalidPaymentHash("invalid payment hash hex".to_string())
+                })?;
+            let payment_hash = PaymentHash(hash_bytes);
+
+            let description = payload
+                .memo
+                .unwrap_or_else(|| "ldk-tutorial-node".to_string());
+
+            let description_obj = Description::new(description)
+                .map_err(|e| APIError::FailedInvoiceCreation(e.to_string()))?;
+            let description_param = Bolt11InvoiceDescription::Direct(description_obj);
+
+            let invoice_params = Bolt11InvoiceParameters {
+                amount_msats: payload.amt_msat,
+                description: description_param,
+                invoice_expiry_delta_secs: Some(payload.expiry_sec),
+                min_final_cltv_expiry_delta: None,
+                payment_hash: Some(payment_hash),
+                contract_id,
+                asset_amount: payload.asset_amount,
+            };
+
+            let invoice = match unlocked_state
+                .channel_manager
+                .create_bolt11_invoice(invoice_params)
+            {
+                Ok(inv) => inv,
+                Err(e) => return Err(APIError::FailedInvoiceCreation(e.to_string())),
+            };
+            (invoice, None)
         } else {
             let invoice_params = Bolt11InvoiceParameters {
                 amount_msats: payload.amt_msat,

@@ -1912,8 +1912,12 @@ components:
           example: 42
         preimage:
           type: string
-          description: Optional custom payment preimage (hex string, 32 bytes)
+          description: Optional custom payment preimage (hex string, 32 bytes). Mutually exclusive with payment_hash.
           example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        payment_hash:
+          type: string
+          description: Optional payment hash (hex string, 32 bytes) for HODL invoices. Mutually exclusive with preimage.
+          example: "229a76310b22a588271adcabc93362239c538103ebe2a8dea1822f9cde6c6040"
         memo:
           type: string
           description: Optional memo/description for the invoice
