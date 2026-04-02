@@ -1,6 +1,5 @@
 use amplify::s;
 use axum::{
-    extract::rejection::JsonRejection,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -90,7 +89,7 @@ pub enum APIError {
     #[error("Failed to send onion message: {0}")]
     FailedSendingOnionMessage(String),
 
-    #[error("For an RGB operation both asset_id and asset_amount must be set")]
+    #[error("For an RGB operation both the asset ID and amount are necessary")]
     IncompleteRGBInfo,
 
     #[error("Not enough assets")]
@@ -141,6 +140,9 @@ pub enum APIError {
     #[error("Trying to request fee estimation for an invalid block number")]
     InvalidEstimationBlocks,
 
+    #[error("Invalid expiration")]
+    InvalidExpiration,
+
     #[error("Invalid fee rate: {0}")]
     InvalidFeeRate(String),
 
@@ -155,6 +157,9 @@ pub enum APIError {
 
     #[error("Invalid media digest")]
     InvalidMediaDigest,
+
+    #[error("Invalid mnemonic: {0}")]
+    InvalidMnemonic(String),
 
     #[error("Invalid name: {0}")]
     InvalidName(String),
@@ -198,8 +203,14 @@ pub enum APIError {
     #[error("The provided recipient ID is neither a blinded UTXO or a script")]
     InvalidRecipientID,
 
+    #[error("The provided recipient map is invalid")]
+    InvalidRecipientMap,
+
     #[error("The provided recipient ID is for a different network than the wallet's one")]
     InvalidRecipientNetwork,
+
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
 
     #[error("Invalid swap: {0}")]
     InvalidSwap(String),
@@ -224,9 +235,6 @@ pub enum APIError {
 
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
-
-    #[error(transparent)]
-    JsonExtractorRejection(#[from] JsonRejection),
 
     #[error("Node is locked (hint: call unlock)")]
     LockedNode,
@@ -303,6 +311,9 @@ pub enum APIError {
     #[error("The provided backup has an unsupported version: {version}")]
     UnsupportedBackupVersion { version: String },
 
+    #[error("Inflation is not supported by schema {0}")]
+    UnsupportedInflation(String),
+
     #[error("Layer 1 {0} is not supported")]
     UnsupportedLayer1(String),
 
@@ -323,6 +334,18 @@ impl APIError {
             .next()
             .unwrap()
             .to_string()
+    }
+}
+
+impl From<axum::extract::rejection::JsonRejection> for APIError {
+    fn from(err: axum::extract::rejection::JsonRejection) -> Self {
+        APIError::InvalidRequest(err.to_string())
+    }
+}
+
+impl From<axum::extract::multipart::MultipartRejection> for APIError {
+    fn from(err: axum::extract::multipart::MultipartRejection) -> Self {
+        APIError::InvalidRequest(err.to_string())
     }
 }
 
@@ -354,12 +377,12 @@ impl From<RgbLibError> for APIError {
             }
             RgbLibError::InvalidAddress { details } => APIError::InvalidAddress(details),
             RgbLibError::InvalidAmountZero => APIError::InvalidAmount(s!("0")),
-            RgbLibError::InvalidAssetID { asset_id } => APIError::InvalidAssetID(asset_id),
             RgbLibError::InvalidAssignment => APIError::InvalidAssignment,
             RgbLibError::InvalidAttachments { details } => APIError::InvalidAttachments(details),
             RgbLibError::InvalidDetails { details } => APIError::InvalidDetails(details),
             RgbLibError::InvalidElectrum { details } => APIError::InvalidIndexer(details),
             RgbLibError::InvalidEstimationBlocks => APIError::InvalidEstimationBlocks,
+            RgbLibError::InvalidExpiration => APIError::InvalidExpiration,
             RgbLibError::InvalidFeeRate { details } => APIError::InvalidFeeRate(details),
             RgbLibError::InvalidFilePath { .. } => APIError::MediaFileNotProvided,
             RgbLibError::InvalidIndexer { details } => APIError::InvalidIndexer(details),
@@ -373,6 +396,7 @@ impl From<RgbLibError> for APIError {
                 APIError::InvalidRecipientData(details)
             }
             RgbLibError::InvalidRecipientID => APIError::InvalidRecipientID,
+            RgbLibError::InvalidRecipientMap => APIError::InvalidRecipientMap,
             RgbLibError::InvalidRecipientNetwork => APIError::InvalidRecipientNetwork,
             RgbLibError::InvalidTicker { details } => APIError::InvalidTicker(details),
             RgbLibError::InvalidTransportEndpoint { details } => {
@@ -384,6 +408,9 @@ impl From<RgbLibError> for APIError {
             RgbLibError::MaxFeeExceeded { txid } => APIError::MaxFeeExceeded(txid),
             RgbLibError::MinFeeNotMet { txid } => APIError::MinFeeNotMet(txid),
             RgbLibError::Network { details } => APIError::Network(details),
+            RgbLibError::NoInflationAmounts => {
+                APIError::InvalidAmount(s!("inflation request with no amounts or zero amounts"))
+            }
             RgbLibError::NoIssuanceAmounts => {
                 APIError::InvalidAmount(s!("issuance request with no provided amounts"))
             }
@@ -391,8 +418,14 @@ impl From<RgbLibError> for APIError {
             RgbLibError::OutputBelowDustLimit => APIError::OutputBelowDustLimit,
             RgbLibError::Proxy { details } => APIError::Network(format!("proxy err: {details}")),
             RgbLibError::RecipientIDAlreadyUsed => APIError::RecipientIDAlreadyUsed,
+            RgbLibError::TooHighInflationAmounts => {
+                APIError::InvalidAmount(s!("inflation amount exceeds the max possible supply"))
+            }
             RgbLibError::TooHighIssuanceAmounts => {
                 APIError::InvalidAmount(s!("trying to issue too many assets"))
+            }
+            RgbLibError::UnsupportedInflation { asset_schema } => {
+                APIError::UnsupportedInflation(format!("{asset_schema}"))
             }
             RgbLibError::UnsupportedLayer1 { layer_1 } => APIError::UnsupportedLayer1(layer_1),
             RgbLibError::UnsupportedTransportType => APIError::UnsupportedTransportType,
@@ -407,11 +440,6 @@ impl From<RgbLibError> for APIError {
 impl IntoResponse for APIError {
     fn into_response(self) -> Response {
         let (status, error, name) = match self {
-            APIError::JsonExtractorRejection(ref json_rejection) => (
-                json_rejection.status(),
-                json_rejection.body_text(),
-                self.name(),
-            ),
             APIError::FailedClosingChannel(_)
             | APIError::FailedInvoiceCreation(_)
             | APIError::FailedIssuingAsset(_)
@@ -442,10 +470,12 @@ impl IntoResponse for APIError {
             | APIError::InvalidChannelID
             | APIError::InvalidDetails(_)
             | APIError::InvalidEstimationBlocks
+            | APIError::InvalidExpiration
             | APIError::InvalidFeeRate(_)
             | APIError::InvalidHexString(_)
             | APIError::InvalidInvoice(_)
             | APIError::InvalidMediaDigest
+            | APIError::InvalidMnemonic(_)
             | APIError::InvalidName(_)
             | APIError::InvalidNodeIds(_)
             | APIError::InvalidOnionData(_)
@@ -458,7 +488,9 @@ impl IntoResponse for APIError {
             | APIError::InvalidPubkey
             | APIError::InvalidRecipientData(_)
             | APIError::InvalidRecipientID
+            | APIError::InvalidRecipientMap
             | APIError::InvalidRecipientNetwork
+            | APIError::InvalidRequest(_)
             | APIError::InvalidSwap(_)
             | APIError::InvalidSwapString(_, _)
             | APIError::InvalidTicker(_)
@@ -511,6 +543,7 @@ impl IntoResponse for APIError {
             | APIError::UnknownLNInvoice
             | APIError::UnknownTemporaryChannelId
             | APIError::UnlockedNode
+            | APIError::UnsupportedInflation(_)
             | APIError::UnsupportedLayer1(_)
             | APIError::UnsupportedTransportType => {
                 (StatusCode::FORBIDDEN, self.to_string(), self.name())
@@ -556,4 +589,36 @@ pub enum AppError {
 
     #[error("Port {0} is unavailable")]
     UnavailablePort(u16),
+}
+
+/// The error variants returned by the authentication checks
+#[derive(Debug)]
+pub enum AuthError {
+    Unauthorized,
+    Forbidden,
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        match self {
+            AuthError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                Json(APIErrorResponse {
+                    code: StatusCode::UNAUTHORIZED.as_u16(),
+                    error: s!("Missing or invalid credentials"),
+                    name: s!("Unauthorized"),
+                }),
+            )
+                .into_response(),
+            AuthError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                Json(APIErrorResponse {
+                    code: StatusCode::FORBIDDEN.as_u16(),
+                    error: s!("You don't have access to this resource"),
+                    name: s!("Forbidden"),
+                }),
+            )
+                .into_response(),
+        }
+    }
 }

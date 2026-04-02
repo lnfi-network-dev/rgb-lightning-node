@@ -45,12 +45,12 @@ use crate::routes::{
     address, asset_balance, asset_id_from_hex_bytes, asset_id_to_hex_bytes, asset_metadata, backup,
     btc_balance, change_password, check_indexer_url, check_proxy_endpoint, close_channel,
     connect_peer, create_utxos, decode_ln_invoice, decode_rgb_invoice, disconnect_peer,
-    estimate_fee, fail_transfers, get_asset_media, get_channel_id, get_payment, get_swap, init,
+    estimate_fee, fail_transfers, get_asset_media, get_channel_id, get_payment, get_swap, inflate, init,
     invoice_status, issue_asset_cfa, issue_asset_nia, issue_asset_uda, keysend, list_assets,
     list_channels, list_payments, list_peers, list_swaps, list_transactions, list_transfers,
     list_unspents, ln_invoice, lock, maker_execute, maker_init, network_info, node_info,
     node_state, open_channel, post_asset_media, refresh_transfers, restore, revoke_token,
-    rgb_invoice, send_asset, send_btc, send_onion_message, send_payment, shutdown, sign_message,
+    rgb_invoice, send_asset, send_btc, send_onion_message, send_payment, send_rgb, shutdown, sign_message,
     sync, taker, unlock, webhook_list, webhook_subscribe, webhook_unsubscribe,
 };
 use crate::utils::{start_daemon, AppState, LOGS_DIR};
@@ -127,9 +127,11 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/getchannelid", post(get_channel_id))
         .route("/getpayment", post(get_payment))
         .route("/getswap", post(get_swap))
+        .route("/inflate", post(inflate))
         .route("/init", post(init))
         .route("/invoicestatus", post(invoice_status))
         .route("/issueassetcfa", post(issue_asset_cfa))
+        .route("/issueassetifa", post(issue_asset_ifa))
         .route("/issueassetnia", post(issue_asset_nia))
         .route("/issueassetuda", post(issue_asset_uda))
         .route("/keysend", post(keysend))
@@ -153,10 +155,10 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/restore", post(restore))
         .route("/revoketoken", post(revoke_token))
         .route("/rgbinvoice", post(rgb_invoice))
-        .route("/sendasset", post(send_asset))
         .route("/sendbtc", post(send_btc))
         .route("/sendonionmessage", post(send_onion_message))
         .route("/sendpayment", post(send_payment))
+        .route("/sendrgb", post(send_rgb))
         .route("/shutdown", post(shutdown))
         .route("/signmessage", post(sign_message))
         .route("/sync", post(sync))

@@ -68,11 +68,11 @@ use rgb_lib::{
     utils::{get_account_data, recipient_id_from_script_buf, script_buf_from_recipient_id},
     wallet::{
         rust_only::{check_indexer_url, AssetColoringInfo, ColoringInfo},
-        DatabaseType, Recipient, TransportEndpoint, Wallet as RgbLibWallet, WalletData,
-        WitnessData,
+        DatabaseType, Recipient, SinglesigKeys, TransportEndpoint, Wallet as RgbLibWallet,
+        WalletData, WitnessData,
     },
-    AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, FileContent, RgbTransfer,
-    RgbTxid, WitnessOrd,
+    AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Fascia, FileContent,
+    RgbTransfer, RgbTxid, WitnessOrd,
 };
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -128,6 +128,7 @@ pub(crate) struct PaymentInfo {
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
     pub(crate) payee_pubkey: PublicKey,
+    pub(crate) expires_at: Option<u64>,
 }
 
 impl_writeable_tlv_based!(PaymentInfo, {
@@ -138,6 +139,7 @@ impl_writeable_tlv_based!(PaymentInfo, {
     (8, created_at, required),
     (10, updated_at, required),
     (12, payee_pubkey, required),
+    (14, expires_at, option),
 });
 
 pub(crate) struct InboundPaymentInfoStorage {
@@ -315,6 +317,30 @@ impl UnlockedAppState {
         }
     }
 
+    pub(crate) fn list_updated_inbound_payments(&self) -> LdkHashMap<PaymentHash, PaymentInfo> {
+        let now = get_current_timestamp();
+        let mut inbound = self.get_inbound_payments();
+        let mut failed = false;
+        for (_, payment_info) in inbound
+            .payments
+            .iter_mut()
+            .filter(|(_, i)| matches!(i.status, HTLCStatus::Pending))
+        {
+            if let Some(expires_at) = payment_info.expires_at {
+                if now > expires_at {
+                    payment_info.status = HTLCStatus::Failed;
+                    payment_info.updated_at = now;
+                    failed = true;
+                }
+            }
+        }
+        let payments = inbound.payments.clone();
+        if failed {
+            self.save_inbound_payments(inbound);
+        }
+        payments
+    }
+
     pub(crate) fn inbound_payments(&self) -> LdkHashMap<PaymentHash, PaymentInfo> {
         self.get_inbound_payments().payments.clone()
     }
@@ -351,6 +377,9 @@ impl UnlockedAppState {
                 payment_info.status = status;
                 payment_info.preimage = preimage;
                 payment_info.secret = secret;
+                if amt_msat.is_some() {
+                    payment_info.amt_msat = amt_msat;
+                }
                 payment_info.updated_at = get_current_timestamp();
             }
             Entry::Vacant(e) => {
@@ -363,6 +392,7 @@ impl UnlockedAppState {
                     created_at,
                     updated_at: created_at,
                     payee_pubkey,
+                    expires_at: None,
                 });
             }
         }
@@ -642,7 +672,9 @@ async fn handle_ldk_events(
                         bitcoin_bech32::constants::Network::Testnet
                     }
                     BitcoinNetwork::Regtest => bitcoin_bech32::constants::Network::Regtest,
-                    BitcoinNetwork::Signet => bitcoin_bech32::constants::Network::Signet,
+                    BitcoinNetwork::Signet | BitcoinNetwork::SignetCustom => {
+                        bitcoin_bech32::constants::Network::Signet
+                    }
                 },
             )
             .expect("Lightning funding tx should always be to a SegWit output");
@@ -658,12 +690,13 @@ async fn handle_ldk_events(
                     &PathBuf::from(&static_state.ldk_data_dir),
                 );
 
-                let channel_rgb_amount: u64 = rgb_info.local_rgb_amount;
+                let channel_rgb_amount = rgb_info.local_rgb_amount + rgb_info.remote_rgb_amount;
                 let asset_id = rgb_info.contract_id.to_string();
                 let assignment = match rgb_info.schema {
-                    AssetSchema::Nia | AssetSchema::Cfa => Assignment::Fungible(channel_rgb_amount),
+                    AssetSchema::Nia | AssetSchema::Cfa | AssetSchema::Ifa => {
+                        Assignment::Fungible(channel_rgb_amount)
+                    }
                     AssetSchema::Uda => Assignment::NonFungible,
-                    AssetSchema::Ifa => todo!(),
                 };
 
                 let recipient_id = recipient_id_from_script_buf(script_buf, static_state.network);
@@ -681,9 +714,25 @@ async fn handle_ldk_events(
 
                 let unlocked_state_copy = unlocked_state.clone();
                 let unsigned_psbt = tokio::task::spawn_blocking(move || {
+                    let res = unlocked_state_copy
+                        .rgb_send_begin(
+                            recipient_map,
+                            true,
+                            FEE_RATE,
+                            MIN_CHANNEL_CONFIRMATIONS,
+                            None,
+                            true,
+                        )
+                        .unwrap();
+                    let fascia_str = fs::read_to_string(&res.details.fascia_path).unwrap();
+                    let fascia: Fascia = serde_json::from_str(&fascia_str).unwrap();
                     unlocked_state_copy
-                        .rgb_send_begin(recipient_map, true, FEE_RATE, MIN_CHANNEL_CONFIRMATIONS)
-                        .unwrap()
+                        .rgb_consume_fascia(fascia, None)
+                        .unwrap();
+                    unlocked_state_copy
+                        .rgb_create_consignments(res.psbt.clone())
+                        .unwrap();
+                    res.psbt
                 })
                 .await
                 .unwrap();
@@ -1283,6 +1332,8 @@ async fn handle_ldk_events(
                 reason
             );
 
+            *unlocked_state.rgb_send_lock.lock().unwrap() = false;
+
             unlocked_state.delete_channel_id(channel_id);
         }
         Event::DiscardFunding { channel_id, .. } => {
@@ -1292,8 +1343,6 @@ async fn handle_ldk_events(
                 "EVENT: Discarded funding for channel with ID {}",
                 channel_id
             );
-
-            *unlocked_state.rgb_send_lock.lock().unwrap() = false;
 
             unlocked_state.delete_channel_id(channel_id);
         }
@@ -1722,7 +1771,7 @@ pub(crate) async fn start_ldk(
             BitcoinNetwork::Testnet => "test",
             BitcoinNetwork::Testnet4 => "testnet4",
             BitcoinNetwork::Regtest => "regtest",
-            BitcoinNetwork::Signet => "signet",
+            BitcoinNetwork::Signet | BitcoinNetwork::SignetCustom => "signet",
         }
     {
         return Err(APIError::NetworkMismatch(bitcoind_chain, bitcoin_network));
@@ -1744,6 +1793,11 @@ pub(crate) async fn start_ldk(
             BitcoinNetwork::Testnet => ELECTRUM_URL_TESTNET,
             BitcoinNetwork::Testnet4 => ELECTRUM_URL_TESTNET4,
             BitcoinNetwork::Mainnet => ELECTRUM_URL_MAINNET,
+            BitcoinNetwork::SignetCustom => {
+                return Err(APIError::InvalidIndexer(s!(
+                    "with custom signet indexer must be provided"
+                )))
+            }
         }
     };
     let proxy_endpoint = if let Some(proxy_endpoint) = &unlock_request.proxy_endpoint {
@@ -1754,6 +1808,7 @@ pub(crate) async fn start_ldk(
         tracing::info!("Using the default proxy");
         match bitcoin_network {
             BitcoinNetwork::Signet
+            | BitcoinNetwork::SignetCustom
             | BitcoinNetwork::Testnet
             | BitcoinNetwork::Testnet4
             | BitcoinNetwork::Mainnet => PROXY_ENDPOINT_PUBLIC,
@@ -1925,27 +1980,37 @@ pub(crate) async fn start_ldk(
     // Prepare the RGB wallet
     let mnemonic_str = mnemonic.to_string();
     let (_, account_xpub_vanilla, _) =
-        get_account_data(bitcoin_network, &mnemonic_str, false).unwrap();
+        get_account_data(&bitcoin_network, &mnemonic_str, false).unwrap();
     let (_, account_xpub_colored, master_fingerprint) =
-        get_account_data(bitcoin_network, &mnemonic_str, true).unwrap();
+        get_account_data(&bitcoin_network, &mnemonic_str, true).unwrap();
     let data_dir = static_state
         .storage_dir_path
         .clone()
         .to_string_lossy()
         .to_string();
+    let keys = SinglesigKeys {
+        account_xpub_vanilla: account_xpub_vanilla.to_string(),
+        account_xpub_colored: account_xpub_colored.to_string(),
+        vanilla_keychain: None,
+        master_fingerprint: master_fingerprint.to_string(),
+        mnemonic: Some(mnemonic.to_string()),
+    };
     let mut rgb_wallet = tokio::task::spawn_blocking(move || {
-        RgbLibWallet::new(WalletData {
-            data_dir,
-            bitcoin_network,
-            database_type: DatabaseType::Sqlite,
-            max_allocations_per_utxo: 1,
-            account_xpub_vanilla: account_xpub_vanilla.to_string(),
-            account_xpub_colored: account_xpub_colored.to_string(),
-            master_fingerprint: master_fingerprint.to_string(),
-            mnemonic: Some(mnemonic.to_string()),
-            vanilla_keychain: None,
-            supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
-        })
+        RgbLibWallet::new(
+            WalletData {
+                data_dir,
+                bitcoin_network,
+                database_type: DatabaseType::Sqlite,
+                max_allocations_per_utxo: 1,
+                supported_schemas: vec![
+                    AssetSchema::Nia,
+                    AssetSchema::Cfa,
+                    AssetSchema::Uda,
+                    AssetSchema::Ifa,
+                ],
+            },
+            keys,
+        )
         .expect("valid rgb-lib wallet")
     })
     .await
@@ -1980,7 +2045,7 @@ pub(crate) async fn start_ldk(
 
     let rgb_wallet_wrapper = Arc::new(RgbLibWalletWrapper::new(
         Arc::new(Mutex::new(rgb_wallet)),
-        rgb_online.clone(),
+        rgb_online,
     ));
 
     // Initialize the OutputSweeper.
