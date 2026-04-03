@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [ "feature-lnfi" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "feature-lnfi" ]
 
