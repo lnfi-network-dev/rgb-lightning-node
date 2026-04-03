@@ -1000,9 +1000,7 @@ async fn handle_ldk_events(
                             payment_hash,
                             payment_preimage
                         );
-                        unlocked_state
-                            .channel_manager
-                            .claim_funds(payment_preimage);
+                        unlocked_state.channel_manager.claim_funds(payment_preimage);
                     }
                 }
             }

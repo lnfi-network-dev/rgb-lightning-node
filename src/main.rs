@@ -45,13 +45,13 @@ use crate::routes::{
     address, asset_balance, asset_id_from_hex_bytes, asset_id_to_hex_bytes, asset_metadata, backup,
     btc_balance, change_password, check_indexer_url, check_proxy_endpoint, close_channel,
     connect_peer, create_utxos, decode_ln_invoice, decode_rgb_invoice, disconnect_peer,
-    estimate_fee, fail_transfers, get_asset_media, get_channel_id, get_payment, get_swap, inflate, init,
-    invoice_status, issue_asset_cfa, issue_asset_ifa, issue_asset_nia, issue_asset_uda, keysend, list_assets,
-    list_channels, list_payments, list_peers, list_swaps, list_transactions, list_transfers,
-    list_unspents, ln_invoice, lock, maker_execute, maker_init, network_info, node_info,
-    node_state, open_channel, post_asset_media, refresh_transfers, restore, revoke_token,
-    rgb_invoice, send_btc, send_onion_message, send_payment, send_rgb, shutdown, sign_message,
-    sync, taker, unlock, webhook_list, webhook_subscribe, webhook_unsubscribe,
+    estimate_fee, fail_transfers, get_asset_media, get_channel_id, get_payment, get_swap, inflate,
+    init, invoice_status, issue_asset_cfa, issue_asset_ifa, issue_asset_nia, issue_asset_uda,
+    keysend, list_assets, list_channels, list_payments, list_peers, list_swaps, list_transactions,
+    list_transfers, list_unspents, ln_invoice, lock, maker_execute, maker_init, network_info,
+    node_info, node_state, open_channel, post_asset_media, refresh_transfers, restore,
+    revoke_token, rgb_invoice, send_btc, send_onion_message, send_payment, send_rgb, shutdown,
+    sign_message, sync, taker, unlock, webhook_list, webhook_subscribe, webhook_unsubscribe,
 };
 use crate::utils::{start_daemon, AppState, LOGS_DIR};
 
