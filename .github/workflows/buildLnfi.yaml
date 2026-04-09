@@ -28,6 +28,9 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+      - name: Apply rust-lightning patch
+        run: bash patches/apply-rust-lightning.sh
+
       - name: Build
         run: cargo build --release
 
