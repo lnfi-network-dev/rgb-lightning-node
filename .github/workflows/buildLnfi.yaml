@@ -2,10 +2,10 @@ name: Build
 
 on:
   push:
-    branches: [ "feature-lnfi" ]
+    branches: [ "feature-lnfi-sqlite" ]
     tags: [ "v*" ]
   pull_request:
-    branches: [ "feature-lnfi" ]
+    branches: [ "feature-lnfi-sqlite" ]
 
 env:
   CARGO_TERM_COLOR: always
