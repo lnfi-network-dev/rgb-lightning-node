@@ -16,13 +16,14 @@ async fn success() {
         std::fs::remove_dir_all(&test_dir_node1).unwrap();
     }
 
-    let node1_addr = start_daemon(&test_dir_node1, NODE1_PEER_PORT).await;
+    let node1_addr = start_daemon(&test_dir_node1, NODE1_PEER_PORT, None, false).await;
     let state_response = node_state(node1_addr).await;
     assert!(matches!(state_response.state, NodeState::None));
 
     let password = format!("{test_dir_node1}.{NODE1_PEER_PORT}");
     let payload = InitRequest {
         password: password.clone(),
+        mnemonic: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{}/init", node1_addr))

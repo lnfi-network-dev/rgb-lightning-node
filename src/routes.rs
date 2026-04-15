@@ -13,14 +13,12 @@ use hex::DisplayHex;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
-use lightning::rgb_utils::{
-    get_rgb_channel_info_path, get_rgb_payment_info_path, parse_rgb_channel_info,
-    parse_rgb_payment_info, STATIC_BLINDING,
-};
+use lightning::rgb_utils::{RgbKvStoreExt, STATIC_BLINDING};
 use lightning::routing::gossip::RoutingFees;
 use lightning::routing::router::{Path as LnPath, Route, RouteHint, RouteHintHop};
 use lightning::sign::EntropySource;
 use lightning::util::config::ChannelConfig;
+use lightning::util::persist::KVStoreSync;
 use lightning::{chain::channelmonitor::Balance, impl_writeable_tlv_based_enum};
 use lightning::{
     ln::channel_state::ChannelShutdownState, onion_message::messenger::MessageSendInstructions,
@@ -32,7 +30,7 @@ use lightning::{
 };
 use lightning::{
     ln::channelmanager::{PaymentId, RecipientOnionFields, Retry},
-    rgb_utils::{write_rgb_channel_info, write_rgb_payment_info_file, RgbInfo},
+    rgb_utils::{write_rgb_payment_info_file, RgbInfo},
     routing::{
         gossip::NodeId,
         router::{PaymentParameters, RouteParameters},
@@ -62,12 +60,7 @@ use rgb_lib::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
-    net::ToSocketAddrs,
-    path::{Path, PathBuf},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
+    collections::HashMap, net::ToSocketAddrs, path::Path, str::FromStr, sync::Arc, time::Duration,
 };
 use tokio::{
     fs::File,
@@ -79,7 +72,7 @@ use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices, MIN_CHANNEL_CONFIRM
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str,
+    encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_route, hex_str,
     hex_str_to_compressed_pubkey, hex_str_to_vec, UnlockedAppState, UserOnionMessageContents,
 };
 use crate::{
@@ -87,7 +80,6 @@ use crate::{
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
 use crate::{
-    disk::{self, CHANNEL_PEER_DATA},
     error::APIError,
     ldk::{PaymentInfo, FEE_RATE, UTXO_SIZE_SAT},
     utils::{
@@ -1505,15 +1497,16 @@ pub(crate) async fn asset_balance(
     let mut offchain_outbound = 0;
     let mut offchain_inbound = 0;
     for chan_info in unlocked_state.channel_manager.list_channels() {
-        let info_file_path = get_rgb_channel_info_path(
-            &chan_info.channel_id.0.as_hex().to_string(),
-            &state.static_state.ldk_data_dir,
-            false,
-        );
-        if !info_file_path.exists() {
-            continue;
-        }
-        let rgb_info = parse_rgb_channel_info(&info_file_path);
+        let channel_id_str = chan_info.channel_id.0.as_hex().to_string();
+
+        let rgb_info = match unlocked_state
+            .kv_store
+            .read_rgb_channel_info(&channel_id_str, false)
+        {
+            Ok(info) => info,
+            Err(_) => continue,
+        };
+
         if rgb_info.contract_id == contract_id {
             offchain_outbound += rgb_info.local_rgb_amount;
             offchain_inbound += rgb_info.remote_rgb_amount;
@@ -1587,8 +1580,7 @@ pub(crate) async fn backup(
     no_cancel(async move {
         let _guard = state.check_locked().await?;
 
-        let _mnemonic =
-            check_password_validity(&payload.password, &state.static_state.storage_dir_path)?;
+        let _mnemonic = check_password_validity(&payload.password, &state.static_state.database)?;
 
         do_backup(
             &state.static_state.storage_dir_path,
@@ -1635,12 +1627,12 @@ pub(crate) async fn change_password(
         check_password_strength(payload.new_password.clone())?;
 
         let mnemonic =
-            check_password_validity(&payload.old_password, &state.static_state.storage_dir_path)?;
+            check_password_validity(&payload.old_password, &state.static_state.database)?;
 
         encrypt_and_save_mnemonic(
             payload.new_password,
             mnemonic.to_string(),
-            &get_mnemonic_path(&state.static_state.storage_dir_path),
+            &state.static_state.database,
         )?;
 
         Ok(Json(EmptyResponse {}))
@@ -1756,11 +1748,8 @@ pub(crate) async fn connect_peer(
         if let Some(peer_addr) = peer_addr {
             connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
                 .await?;
-            disk::persist_channel_peer(
-                &state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA),
-                &peer_pubkey,
-                &peer_addr,
-            )?;
+            let db = state.get_db();
+            db.persist_channel_peer(&peer_pubkey, &peer_addr)?;
         } else {
             return Err(APIError::InvalidPeerInfo(s!(
                 "incorrectly formatted peer info. Should be formatted as: `pubkey@host:port`"
@@ -1861,10 +1850,8 @@ pub(crate) async fn disconnect_peer(
             }
         }
 
-        disk::delete_channel_peer(
-            &state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA),
-            payload.peer_pubkey,
-        )?;
+        let db = state.get_db();
+        db.delete_channel_peer(&payload.peer_pubkey)?;
 
         //check the pubkey matches a valid connected peer
         if unlocked_state
@@ -1960,6 +1947,78 @@ pub(crate) async fn get_channel_id(
     };
 
     Ok(Json(GetChannelIdResponse { channel_id }))
+}
+
+pub(crate) async fn get_payment(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<GetPaymentRequest>, APIError>,
+) -> Result<Json<GetPaymentResponse>, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let payment_hash_vec = hex_str_to_vec(&payload.payment_hash);
+    if payment_hash_vec.is_none() || payment_hash_vec.as_ref().unwrap().len() != 32 {
+        return Err(APIError::InvalidPaymentHash(payload.payment_hash));
+    }
+    let requested_ph = PaymentHash(payment_hash_vec.unwrap().try_into().unwrap());
+
+    let inbound_payments = unlocked_state.list_updated_inbound_payments();
+    let outbound_payments = unlocked_state.outbound_payments();
+
+    for (payment_hash, payment_info) in &inbound_payments {
+        if payment_hash == &requested_ph {
+            let (asset_amount, asset_id) = unlocked_state
+                .kv_store
+                .read_rgb_payment_info(payment_hash, true)
+                .ok()
+                .map(|info| (Some(info.amount), Some(info.contract_id.to_string())))
+                .unwrap_or((None, None));
+
+            return Ok(Json(GetPaymentResponse {
+                payment: Payment {
+                    amt_msat: payment_info.amt_msat,
+                    asset_amount,
+                    asset_id,
+                    payment_hash: hex_str(&payment_hash.0),
+                    inbound: true,
+                    status: payment_info.status,
+                    created_at: payment_info.created_at,
+                    updated_at: payment_info.updated_at,
+                    payee_pubkey: payment_info.payee_pubkey.to_string(),
+                    preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+                },
+            }));
+        }
+    }
+
+    for (payment_id, payment_info) in &outbound_payments {
+        let payment_hash = &PaymentHash(payment_id.0);
+        if payment_hash == &requested_ph {
+            let (asset_amount, asset_id) = unlocked_state
+                .kv_store
+                .read_rgb_payment_info(payment_hash, false)
+                .ok()
+                .map(|info| (Some(info.amount), Some(info.contract_id.to_string())))
+                .unwrap_or((None, None));
+
+            return Ok(Json(GetPaymentResponse {
+                payment: Payment {
+                    amt_msat: payment_info.amt_msat,
+                    asset_amount,
+                    asset_id,
+                    payment_hash: hex_str(&payment_hash.0),
+                    inbound: false,
+                    status: payment_info.status,
+                    created_at: payment_info.created_at,
+                    updated_at: payment_info.updated_at,
+                    payee_pubkey: payment_info.payee_pubkey.to_string(),
+                    preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+                },
+            }));
+        }
+    }
+
+    Err(APIError::PaymentNotFound(payload.payment_hash))
 }
 
 pub(crate) async fn get_swap(
@@ -2064,8 +2123,7 @@ pub(crate) async fn init(
 
         check_password_strength(payload.password.clone())?;
 
-        let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
-        check_already_initialized(&mnemonic_path)?;
+        check_already_initialized(&state.static_state.database)?;
 
         let mnemonic = match payload.mnemonic {
             Some(mnemonic) => Mnemonic::from_str(&mnemonic)
@@ -2074,7 +2132,11 @@ pub(crate) async fn init(
             None => generate_keys(state.static_state.network).mnemonic,
         };
 
-        encrypt_and_save_mnemonic(payload.password, mnemonic.clone(), &mnemonic_path)?;
+        encrypt_and_save_mnemonic(
+            payload.password,
+            mnemonic.clone(),
+            &state.static_state.database,
+        )?;
 
         Ok(Json(InitResponse { mnemonic }))
     })
@@ -2297,12 +2359,12 @@ pub(crate) async fn keysend(
         )?;
         if let Some((contract_id, rgb_amount)) = rgb_payment {
             write_rgb_payment_info_file(
-                &PathBuf::from(&state.static_state.ldk_data_dir),
                 &payment_hash,
                 contract_id,
                 rgb_amount,
                 false,
                 false,
+                &(Arc::clone(&unlocked_state.kv_store) as Arc<dyn KVStoreSync + Send + Sync>),
             );
         }
 
@@ -2354,15 +2416,16 @@ pub(crate) async fn list_assets(
 
     let mut offchain_balances = HashMap::new();
     for chan_info in unlocked_state.channel_manager.list_channels() {
-        let info_file_path = get_rgb_channel_info_path(
-            &chan_info.channel_id.0.as_hex().to_string(),
-            &state.static_state.ldk_data_dir,
-            false,
-        );
-        if !info_file_path.exists() {
-            continue;
-        }
-        let rgb_info = parse_rgb_channel_info(&info_file_path);
+        let channel_id_str = chan_info.channel_id.0.as_hex().to_string();
+
+        let rgb_info = match unlocked_state
+            .kv_store
+            .read_rgb_channel_info(&channel_id_str, false)
+        {
+            Ok(info) => info,
+            Err(_) => continue,
+        };
+
         offchain_balances
             .entry(rgb_info.contract_id.to_string())
             .and_modify(|(offchain_outbound, offchain_inbound)| {
@@ -2490,17 +2553,16 @@ pub(crate) async fn list_channels(
             channel.short_channel_id = Some(id);
         }
 
-        let info_file_path = get_rgb_channel_info_path(
-            &chan_info.channel_id.0.as_hex().to_string(),
-            &state.static_state.ldk_data_dir,
-            false,
-        );
-        if info_file_path.exists() {
-            let rgb_info = parse_rgb_channel_info(&info_file_path);
+        // Read RGB channel info from KVStore
+        let channel_id_str = chan_info.channel_id.0.as_hex().to_string();
+        if let Ok(rgb_info) = unlocked_state
+            .kv_store
+            .read_rgb_channel_info(&channel_id_str, false)
+        {
             channel.asset_id = Some(rgb_info.contract_id.to_string());
             channel.asset_local_amount = Some(rgb_info.local_rgb_amount);
             channel.asset_remote_amount = Some(rgb_info.remote_rgb_amount);
-        };
+        }
 
         channels.push(channel);
     }
@@ -2519,14 +2581,12 @@ pub(crate) async fn list_payments(
     let mut payments = vec![];
 
     for (payment_hash, payment_info) in &inbound_payments {
-        let rgb_payment_info_path_inbound =
-            get_rgb_payment_info_path(payment_hash, &state.static_state.ldk_data_dir, true);
-
-        let (asset_amount, asset_id) = if rgb_payment_info_path_inbound.exists() {
-            let info = parse_rgb_payment_info(&rgb_payment_info_path_inbound);
-            (Some(info.amount), Some(info.contract_id.to_string()))
-        } else {
-            (None, None)
+        let (asset_amount, asset_id) = match unlocked_state
+            .kv_store
+            .read_rgb_payment_info(payment_hash, true)
+        {
+            Ok(info) => (Some(info.amount), Some(info.contract_id.to_string())),
+            Err(_) => (None, None),
         };
 
         payments.push(Payment {
@@ -2546,14 +2606,12 @@ pub(crate) async fn list_payments(
     for (payment_id, payment_info) in &outbound_payments {
         let payment_hash = &PaymentHash(payment_id.0);
 
-        let rgb_payment_info_path_outbound =
-            get_rgb_payment_info_path(payment_hash, &state.static_state.ldk_data_dir, false);
-
-        let (asset_amount, asset_id) = if rgb_payment_info_path_outbound.exists() {
-            let info = parse_rgb_payment_info(&rgb_payment_info_path_outbound);
-            (Some(info.amount), Some(info.contract_id.to_string()))
-        } else {
-            (None, None)
+        let (asset_amount, asset_id) = match unlocked_state
+            .kv_store
+            .read_rgb_payment_info(payment_hash, false)
+        {
+            Ok(info) => (Some(info.amount), Some(info.contract_id.to_string())),
+            Err(_) => (None, None),
         };
 
         payments.push(Payment {
@@ -2571,84 +2629,6 @@ pub(crate) async fn list_payments(
     }
 
     Ok(Json(ListPaymentsResponse { payments }))
-}
-
-pub(crate) async fn get_payment(
-    State(state): State<Arc<AppState>>,
-    WithRejection(Json(payload), _): WithRejection<Json<GetPaymentRequest>, APIError>,
-) -> Result<Json<GetPaymentResponse>, APIError> {
-    let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
-
-    let payment_hash_vec = hex_str_to_vec(&payload.payment_hash);
-    if payment_hash_vec.is_none() || payment_hash_vec.as_ref().unwrap().len() != 32 {
-        return Err(APIError::InvalidPaymentHash(payload.payment_hash));
-    }
-    let requested_ph = PaymentHash(payment_hash_vec.unwrap().try_into().unwrap());
-
-    let inbound_payments = unlocked_state.inbound_payments();
-    let outbound_payments = unlocked_state.outbound_payments();
-
-    for (payment_hash, payment_info) in &inbound_payments {
-        if payment_hash == &requested_ph {
-            let rgb_payment_info_path_inbound =
-                get_rgb_payment_info_path(payment_hash, &state.static_state.ldk_data_dir, true);
-
-            let (asset_amount, asset_id) = if rgb_payment_info_path_inbound.exists() {
-                let info = parse_rgb_payment_info(&rgb_payment_info_path_inbound);
-                (Some(info.amount), Some(info.contract_id.to_string()))
-            } else {
-                (None, None)
-            };
-
-            return Ok(Json(GetPaymentResponse {
-                payment: Payment {
-                    amt_msat: payment_info.amt_msat,
-                    asset_amount,
-                    asset_id,
-                    payment_hash: hex_str(&payment_hash.0),
-                    inbound: true,
-                    status: payment_info.status,
-                    created_at: payment_info.created_at,
-                    updated_at: payment_info.updated_at,
-                    payee_pubkey: payment_info.payee_pubkey.to_string(),
-                    preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
-                },
-            }));
-        }
-    }
-
-    for (payment_id, payment_info) in &outbound_payments {
-        let payment_hash = &PaymentHash(payment_id.0);
-        if payment_hash == &requested_ph {
-            let rgb_payment_info_path_outbound =
-                get_rgb_payment_info_path(payment_hash, &state.static_state.ldk_data_dir, false);
-
-            let (asset_amount, asset_id) = if rgb_payment_info_path_outbound.exists() {
-                let info = parse_rgb_payment_info(&rgb_payment_info_path_outbound);
-                (Some(info.amount), Some(info.contract_id.to_string()))
-            } else {
-                (None, None)
-            };
-
-            return Ok(Json(GetPaymentResponse {
-                payment: Payment {
-                    amt_msat: payment_info.amt_msat,
-                    asset_amount,
-                    asset_id,
-                    payment_hash: hex_str(&payment_hash.0),
-                    inbound: false,
-                    status: payment_info.status,
-                    created_at: payment_info.created_at,
-                    updated_at: payment_info.updated_at,
-                    payee_pubkey: payment_info.payee_pubkey.to_string(),
-                    preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
-                },
-            }));
-        }
-    }
-
-    Err(APIError::PaymentNotFound(payload.payment_hash))
 }
 
 pub(crate) async fn list_peers(
@@ -3036,13 +3016,11 @@ pub(crate) async fn maker_execute(
             .filter(|details| {
                 match get_rgb_channel_info_optional(
                     &details.channel_id,
-                    &state.static_state.ldk_data_dir,
                     false,
+                    unlocked_state.kv_store.as_ref(),
                 ) {
                     _ if swap_info.is_from_btc() => true,
-                    Some((rgb_info, _)) if Some(rgb_info.contract_id) == swap_info.from_asset => {
-                        true
-                    }
+                    Some(rgb_info) if Some(rgb_info.contract_id) == swap_info.from_asset => true,
                     _ => false,
                 }
             })
@@ -3170,12 +3148,12 @@ pub(crate) async fn maker_execute(
 
         if swap_info.is_to_asset() {
             write_rgb_payment_info_file(
-                &state.static_state.ldk_data_dir,
                 &swapstring.payment_hash,
                 swap_info.to_asset.unwrap(),
                 swap_info.qty_to,
                 true,
                 false,
+                &(Arc::clone(&unlocked_state.kv_store) as Arc<dyn KVStoreSync + Send + Sync>),
             );
         }
 
@@ -3262,8 +3240,8 @@ pub(crate) async fn maker_init(
         if let Some(to_asset) = to_asset {
             let max_balance = get_max_local_rgb_amount(
                 to_asset,
-                &state.static_state.ldk_data_dir,
                 unlocked_state.channel_manager.list_channels().iter(),
+                unlocked_state.kv_store.as_ref(),
             );
             if swap_info.qty_to > max_balance {
                 return Err(APIError::InsufficientAssets);
@@ -3372,8 +3350,7 @@ pub(crate) async fn node_info(
 pub(crate) async fn node_state(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<NodeStateResponse>, APIError> {
-    let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
-    if check_already_initialized(&mnemonic_path).is_ok() {
+    if check_already_initialized(&state.static_state.database).is_ok() {
         return Ok(Json(NodeStateResponse {
             state: NodeState::None,
         }));
@@ -3478,7 +3455,7 @@ pub(crate) async fn open_channel(
         let (peer_pubkey, mut peer_addr) =
             parse_peer_info(payload.peer_pubkey_and_opt_addr.to_string())?;
 
-        let peer_data_path = state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA);
+        let db = state.get_db();
         if peer_addr.is_none() {
             if let Some(peer) = unlocked_state.peer_manager.peer_by_node_id(&peer_pubkey) {
                 if let Some(socket_address) = peer.socket_address {
@@ -3490,7 +3467,7 @@ pub(crate) async fn open_channel(
             }
         }
         if peer_addr.is_none() {
-            let peer_info = disk::read_channel_peer_data(&peer_data_path)?;
+            let peer_info = db.read_channel_peer_data()?;
             for (pubkey, addr) in peer_info.into_iter() {
                 if pubkey == peer_pubkey {
                     peer_addr = Some(addr);
@@ -3501,7 +3478,7 @@ pub(crate) async fn open_channel(
         if let Some(peer_addr) = peer_addr {
             connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
                 .await?;
-            disk::persist_channel_peer(&peer_data_path, &peer_pubkey, &peer_addr)?;
+            db.persist_channel_peer(&peer_pubkey, &peer_addr)?;
         } else {
             return Err(APIError::InvalidPeerInfo(s!(
                 "cannot find the address for the provided pubkey"
@@ -3637,22 +3614,12 @@ pub(crate) async fn open_channel(
                 local_rgb_amount: *asset_amount - push_amount,
                 remote_rgb_amount: push_amount,
             };
-            write_rgb_channel_info(
-                &get_rgb_channel_info_path(
-                    &temporary_channel_id,
-                    &state.static_state.ldk_data_dir,
-                    true,
-                ),
-                &rgb_info,
-            );
-            write_rgb_channel_info(
-                &get_rgb_channel_info_path(
-                    &temporary_channel_id,
-                    &state.static_state.ldk_data_dir,
-                    false,
-                ),
-                &rgb_info,
-            );
+            unlocked_state
+                .kv_store
+                .write_rgb_channel_info(&temporary_channel_id, &rgb_info, true);
+            unlocked_state
+                .kv_store
+                .write_rgb_channel_info(&temporary_channel_id, &rgb_info, false);
         }
 
         Ok(Json(OpenChannelResponse {
@@ -3737,8 +3704,7 @@ pub(crate) async fn restore(
     no_cancel(async move {
         let _unlocked_state = state.check_locked().await?;
 
-        let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
-        check_already_initialized(&mnemonic_path)?;
+        check_already_initialized(&state.static_state.database)?;
 
         restore_backup(
             Path::new(&payload.backup_path),
@@ -3746,8 +3712,7 @@ pub(crate) async fn restore(
             &state.static_state.storage_dir_path,
         )?;
 
-        let _mnemonic =
-            check_password_validity(&payload.password, &state.static_state.storage_dir_path)?;
+        let _mnemonic = check_password_validity(&payload.password, &state.static_state.database)?;
 
         Ok(Json(EmptyResponse {}))
     })
@@ -4038,12 +4003,12 @@ pub(crate) async fn send_payment(
             let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
             if let Some((contract_id, rgb_amount)) = rgb_payment {
                 write_rgb_payment_info_file(
-                    &PathBuf::from(&state.static_state.ldk_data_dir),
                     &payment_hash,
                     contract_id,
                     rgb_amount,
                     false,
                     false,
+                    &(Arc::clone(&unlocked_state.kv_store) as Arc<dyn KVStoreSync + Send + Sync>),
                 );
             }
 
@@ -4184,8 +4149,8 @@ pub(crate) async fn taker(
         if let Some(from_asset) = swapstring.swap_info.from_asset {
             let max_balance = get_max_local_rgb_amount(
                 from_asset,
-                &state.static_state.ldk_data_dir,
                 unlocked_state.channel_manager.list_channels().iter(),
+                unlocked_state.kv_store.as_ref(),
             );
             if swapstring.swap_info.qty_from > max_balance {
                 return Err(APIError::InsufficientAssets);
@@ -4219,16 +4184,14 @@ pub(crate) async fn unlock(
             }
         }
 
-        let mnemonic = match check_password_validity(
-            &payload.password,
-            &state.static_state.storage_dir_path,
-        ) {
-            Ok(mnemonic) => mnemonic,
-            Err(e) => {
-                state.update_changing_state(false);
-                return Err(e);
-            }
-        };
+        let mnemonic =
+            match check_password_validity(&payload.password, &state.static_state.database) {
+                Ok(mnemonic) => mnemonic,
+                Err(e) => {
+                    state.update_changing_state(false);
+                    return Err(e);
+                }
+            };
 
         tracing::debug!("Starting LDK...");
         let (new_ldk_background_services, new_unlocked_app_state) =

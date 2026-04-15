@@ -41,8 +41,8 @@ use crate::routes::{
     ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest, MakerInitResponse,
     NetworkInfoResponse, NodeInfoResponse, NodeStateResponse, OpenChannelRequest,
     OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, Recipient, RefreshRequest,
-    RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest,
-    SendAssetResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest, SendPaymentResponse,
+    RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest,
+    SendBtcResponse, SendPaymentRequest, SendPaymentResponse,
     SendRgbRequest, SendRgbResponse, Swap, SwapStatus, TakerRequest, Transaction, Transfer,
     UnlockRequest, Unspent, WitnessData,
 };
@@ -1040,6 +1040,9 @@ async fn ln_invoice(
         expiry_sec,
         asset_id: asset_id.map(|a| a.to_string()),
         asset_amount,
+        preimage: None,
+        payment_hash: None,
+        memo: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/lninvoice"))
